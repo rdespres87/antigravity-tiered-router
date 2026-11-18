@@ -1,28 +1,32 @@
 #!/usr/bin/env python3
 """
-Antigravity Tiered Model Router MCP Server
-------------------------------------------
+Antigravity Tiered Model Router MCP Server (LM Studio Edition)
+--------------------------------------------------------------
 A lightweight, zero-dependency MCP (Model Context Protocol) server running over stdio.
 Implements the hybrid routing engine:
-  1. Priority: Jared Palmer's Kev decision model via Ollama (localhost:11434/v1/systemone)
-  2. Fallback: Deterministic local semantic heuristic engine (instant, offline, zero tokens)
+  1. Primary: Deterministic semantic heuristic engine (instant, offline, zero tokens)
+  2. Fallback: LM Studio decision model via OpenAI-compatible API (/v1/chat/completions)
 
 Exposes tools:
   - classify_and_route_task: Classifies complexity (Low/Medium/High) and suggests tier.
   - evaluate_task_uncertainty: Analyzes subagent execution for doubt, failure, or incomplete work.
   - format_high_consultation: Structures consultation prompts for the High tier consultant.
-  - get_tier_status: Reports health of Ollama, Kev model, and routing statistics.
+  - get_tier_status: Reports health of LM Studio, available models, and routing statistics.
 """
 
 import sys
 import json
 import re
+import os
+import subprocess
+import time
 import urllib.request
 import urllib.error
 from typing import Dict, Any, Optional, Tuple
 
-OLLAMA_HOST = "http://127.0.0.1:11434"
-KEV_MODEL_NAME = "kev"
+# LM Studio runs on localhost:1234 by default (OpenAI-compatible API)
+LMSTUDIO_HOST = os.environ.get("LMSTUDIO_HOST", "http://127.0.0.1:1234")
+DECISION_MODEL = os.environ.get("LMSTUDIO_DECISION_MODEL", "qwen/qwen3.6-35b-a3b")
 CONNECT_TIMEOUT_SEC = 4.0
 
 
@@ -32,38 +36,177 @@ def log(msg: str) -> None:
     sys.stderr.flush()
 
 
-def check_ollama_kev_available(host: str = OLLAMA_HOST) -> Tuple[bool, bool]:
-    """Check if Ollama is running and if the Kev model is pulled."""
+def check_lmstudio_available(host: str = LMSTUDIO_HOST) -> Tuple[bool, list]:
+    """Check if LM Studio is running and list available models."""
     try:
-        req = urllib.request.Request(f"{host}/api/tags", headers={"User-Agent": "AntigravityRouter/1.0"})
+        req = urllib.request.Request(f"{host}/v1/models")
         with urllib.request.urlopen(req, timeout=CONNECT_TIMEOUT_SEC) as resp:
             if resp.status == 200:
                 data = json.loads(resp.read().decode("utf-8"))
-                models = [m.get("name", "").split(":")[0] for m in data.get("models", [])]
-                has_kev = KEV_MODEL_NAME in models or any("kev" in m for m in models)
-                return True, has_kev
+                models = [m.get("id", "") for m in data.get("data", [])]
+                return True, models
     except Exception:
         pass
-    return False, False
+    return False, []
 
 
-def query_kev_systemone(prompt: str, host: str = OLLAMA_HOST) -> Optional[Dict[str, Any]]:
-    """Query Kev via the /v1/systemone non-autoregressive decision API."""
-    url = f"{host}/v1/systemone"
-    payload = {
-        "model": KEV_MODEL_NAME,
-        "state": prompt[:4000],
-        "questions": {
-            "tier": {
-                "type": "choice",
-                "instructions": "Classify the task into the most cost-effective execution tier: low, medium, or high.",
-                "criteria": {
-                    "low": "Simple, read-only, localized, log inspection, file search, or minor script check.",
-                    "medium": "Standard programming, creating endpoints, business logic, unit tests, bug fixing.",
-                    "high": "Complex architecture, multi-repository migration, security overhaul, ambiguous planning."
-                }
-            }
+def detect_active_model(host: str = LMSTUDIO_HOST) -> Tuple[Optional[str], Optional[str]]:
+    """
+    Detect the LLM currently loaded and active in LM Studio.
+    Checks `lms ps --json` first for the exact active model key.
+    Falls back to `/v1/models` HTTP API.
+    Returns: (active_model_id, warning_message_if_none)
+    """
+    try:
+        res = subprocess.run(['lms', 'ps', '--json'], capture_output=True, text=True, timeout=2)
+        if res.returncode == 0:
+            data = json.loads(res.stdout)
+            for item in data:
+                if item.get('type') == 'llm' and item.get('modelKey'):
+                    return item.get('modelKey'), None
+            return None, "Attention : LM Studio est actif mais aucun modèle LLM n'est chargé en mémoire. Veuillez charger un modèle dans LM Studio."
+    except Exception:
+        pass
+
+    # Fallback to HTTP API
+    try:
+        req = urllib.request.Request(f"{host}/v1/models")
+        with urllib.request.urlopen(req, timeout=CONNECT_TIMEOUT_SEC) as resp:
+            if resp.status == 200:
+                data = json.loads(resp.read().decode("utf-8"))
+                models = [m.get("id") for m in data.get("data", []) if "embed" not in m.get("id", "").lower()]
+                if models:
+                    return models[0], None
+                return None, "Attention : LM Studio est actif mais aucun modèle LLM n'est disponible."
+    except Exception as e:
+        return None, f"Attention : LM Studio n'est pas joignable sur {host} ({e})."
+
+    return None, "Attention : Impossible de détecter un modèle actif dans LM Studio."
+
+
+def execute_local_task(
+    prompt: str,
+    system_prompt: Optional[str] = None,
+    context: Optional[str] = None,
+    max_tokens: int = 2048,
+    temperature: float = 0.2,
+    host: str = LMSTUDIO_HOST
+) -> Dict[str, Any]:
+    """
+    Executes a task locally on the active LM Studio model (0 cloud tokens).
+    Handles reasoning models (Qwen 3.6 / R1) and standard LLMs seamlessly.
+    """
+    active_model, warning = detect_active_model(host)
+    if not active_model:
+        return {
+            "success": False,
+            "error": warning or "No LLM model is currently loaded in LM Studio.",
+            "output": "",
+            "action": "Please load a model in LM Studio (e.g. Qwen 3.6) and retry, or fallback to cloud execution."
         }
+
+    sys_content = system_prompt or (
+        "You are an expert, concise software engineer. Provide direct, working code and clear explanations. "
+        "Do not output unrequested chatter."
+    )
+
+    full_prompt = prompt
+    if context:
+        full_prompt = f"### CONTEXT:\n{context}\n\n### TASK:\n{prompt}"
+
+    messages = [
+        {"role": "system", "content": sys_content},
+        {"role": "user", "content": full_prompt}
+    ]
+
+    payload = {
+        "model": active_model,
+        "messages": messages,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+        "stream": False
+    }
+
+    t0 = time.time()
+    try:
+        body = json.dumps(payload).encode("utf-8")
+        req = urllib.request.Request(
+            f"{host}/v1/chat/completions",
+            data=body,
+            headers={
+                "Content-Type": "application/json",
+                "User-Agent": "AntigravityLocalExecutor/1.0"
+            }
+        )
+        with urllib.request.urlopen(req, timeout=90.0) as resp:
+            if resp.status == 200:
+                res = json.loads(resp.read().decode("utf-8"))
+                elapsed = round(time.time() - t0, 2)
+                choice = res.get("choices", [{}])[0]
+                msg = choice.get("message", {})
+                content = msg.get("content", "").strip()
+                reasoning = msg.get("reasoning_content", "").strip()
+                usage = res.get("usage", {})
+
+                # If content is empty (e.g. reasoning model hit limit), fallback to reasoning output
+                final_output = content if content else reasoning
+
+                return {
+                    "success": True,
+                    "model_used": active_model,
+                    "elapsed_seconds": elapsed,
+                    "output": final_output,
+                    "has_reasoning": bool(reasoning),
+                    "tokens_used": usage.get("total_tokens", 0),
+                    "finish_reason": choice.get("finish_reason", "unknown")
+                }
+            else:
+                return {
+                    "success": False,
+                    "error": f"LM Studio returned HTTP {resp.status}",
+                    "output": ""
+                }
+    except Exception as e:
+        elapsed = round(time.time() - t0, 2)
+        log(f"execute_local_task failed after {elapsed}s: {e}")
+        return {
+            "success": False,
+            "error": f"Local model execution failed: {e}",
+            "elapsed_seconds": elapsed,
+            "output": "",
+            "action": "Escalate to cloud model (flash or pro)."
+        }
+
+
+def query_lmstudio_decision(prompt: str, host: str = LMSTUDIO_HOST) -> Optional[Dict[str, Any]]:
+    """
+    Query LM Studio for task classification using chat completions API.
+    Sends a structured prompt and parses the JSON response for tier classification.
+    Falls back to heuristic if LM Studio is unavailable.
+    """
+    url = f"{host}/v1/chat/completions"
+    
+    classification_prompt = f"""You are a task classifier for a tiered AI execution system. Analyze the following task and classify it into one of three tiers.
+
+Task: {prompt[:3000]}
+
+Classification criteria:
+- LOW: Simple, read-only, localized tasks. File viewing, grep searches, syntax checks, documentation typos, single-file minor fixes, status checks, "what is this", "list files", "find pattern".
+- MEDIUM: Standard programming tasks. Feature development, writing code, unit tests, bug fixes, refactoring, multi-file changes that are well-scoped.
+- HIGH: Complex architecture, multi-repository work, security audits, ambiguous planning, breaking changes, distributed systems, deep debugging of elusive bugs.
+
+Respond with ONLY valid JSON, no markdown, no explanation:
+{{"tier": "low"|"medium"|"high", "confidence": 0.0-1.0, "reason": "brief explanation"}}"""
+
+    payload = {
+        "model": DECISION_MODEL,
+        "messages": [
+            {"role": "system", "content": "You are a precise task classifier. Always respond with valid JSON only."},
+            {"role": "user", "content": classification_prompt}
+        ],
+        "temperature": 0.0,
+        "max_tokens": 100,
+        "stream": False
     }
 
     try:
@@ -71,88 +214,48 @@ def query_kev_systemone(prompt: str, host: str = OLLAMA_HOST) -> Optional[Dict[s
         req = urllib.request.Request(
             url,
             data=body,
-            headers={"Content-Type": "application/json", "User-Agent": "AntigravityRouter/1.0"}
+            headers={
+                "Content-Type": "application/json",
+                "User-Agent": "AntigravityRouter/1.0"
+            }
         )
-        with urllib.request.urlopen(req, timeout=CONNECT_TIMEOUT_SEC * 2) as resp:
+        with urllib.request.urlopen(req, timeout=CONNECT_TIMEOUT_SEC * 5) as resp:
             if resp.status == 200:
                 result = json.loads(resp.read().decode("utf-8"))
-                answers = result.get("answers", {})
-                tier_ans = answers.get("tier", {})
-                tier = tier_ans.get("choice", "medium").lower()
-                confidence = float(tier_ans.get("confidence", 0.90))
-                probs = tier_ans.get("probabilities", {})
+                choice = result.get("choices", [{}])[0]
+                msg = choice.get("message", {})
+                # Qwen3.6-35b-a3b puts text in reasoning_content, not content
+                content = msg.get("reasoning_content", "") or msg.get("content", "")
+                
+                # Parse JSON from the response (strip markdown code blocks if present)
+                content = content.strip()
+                if content.startswith("```"):
+                    content = re.sub(r"^```(?:json)?\n?|\n?```$", "", content, flags=re.MULTILINE).strip()
+                
+                parsed = json.loads(content)
+                tier = parsed.get("tier", "medium").lower()
+                confidence = float(parsed.get("confidence", 0.85))
+                reason = parsed.get("reason", "Classified by LM Studio decision model.")
 
                 if tier not in ["low", "medium", "high"]:
                     tier = "medium"
 
-                reasons = {
-                    "low": f"Kev native decision model classified simple/read-only scope (P(low)={probs.get('low', 0):.2f}).",
-                    "medium": f"Kev native decision model classified standard coding/feature development (P(medium)={probs.get('medium', 0):.2f}).",
-                    "high": f"Kev native decision model identified high architectural complexity/risk (P(high)={probs.get('high', 0):.2f})."
+                savings_map = {
+                    "low": "85-92% (Fastest response, minimal tokens)",
+                    "medium": "50-65% (Balanced speed and reasoning)",
+                    "high": "0% (Full reasoning depth, maximum context)"
                 }
 
                 return {
                     "tier": tier,
                     "confidence": round(confidence, 2),
-                    "engine_used": "kev_systemone",
-                    "probabilities": probs,
-                    "reason": reasons.get(tier, f"Kev native decision model chose {tier}."),
-                    "suggested_subagent": f"task-runner-{tier}" if tier != "high" else "consultant-high",
-                    "estimated_token_savings": "80-90% vs High" if tier == "low" else ("40-60% vs High" if tier == "medium" else "Baseline (Full Capability)")
-                }
-    except Exception as e:
-        log(f"Kev /v1/systemone skipped: {e}. Trying fallback...")
-
-    # Dual-fallback: Query local Kev model via Ollama's standard /api/generate endpoint with JSON schema
-    try:
-        gen_url = f"{host}/api/generate"
-        gen_payload = {
-            "model": KEV_MODEL_NAME,
-            "prompt": prompt[:2000],
-            "stream": False,
-            "format": "json"
-        }
-        body = json.dumps(gen_payload).encode("utf-8")
-        req = urllib.request.Request(
-            gen_url,
-            data=body,
-            headers={"Content-Type": "application/json", "User-Agent": "AntigravityRouter/1.0"}
-        )
-        with urllib.request.urlopen(req, timeout=CONNECT_TIMEOUT_SEC * 3) as resp:
-            if resp.status == 200:
-                gen_data = json.loads(resp.read().decode("utf-8"))
-                raw_resp = gen_data.get("response", "{}")
-                parsed = json.loads(raw_resp)
-                answers = parsed.get("answers", parsed)
-
-                is_simple = answers.get("is_simple_task", False)
-                if isinstance(is_simple, dict):
-                    is_simple = is_simple.get("noul", False)
-
-                is_arch = answers.get("is_architectural_or_high_risk", False)
-                if isinstance(is_arch, dict):
-                    is_arch = is_arch.get("noul", False)
-
-                if is_arch:
-                    tier = "high"
-                    reason = "Kev decision model identified high architectural complexity."
-                elif is_simple:
-                    tier = "low"
-                    reason = "Kev decision model identified simple, quick, or read-only task scope."
-                else:
-                    tier = "medium"
-                    reason = "Kev decision model classified standard implementation task."
-
-                return {
-                    "tier": tier,
-                    "confidence": 0.90,
-                    "engine_used": "local_kev_model",
+                    "engine_used": "lmstudio_decision",
                     "reason": reason,
                     "suggested_subagent": f"task-runner-{tier}" if tier != "high" else "consultant-high",
-                    "estimated_token_savings": "80-90% vs High" if tier == "low" else ("40-60% vs High" if tier == "medium" else "Baseline (Full Capability)")
+                    "estimated_token_savings": savings_map[tier]
                 }
-    except Exception as e2:
-        log(f"Local Kev query skipped: {e2}")
+    except Exception as e:
+        log(f"LM Studio decision model skipped: {e}. Using heuristic fallback...")
 
     return None
 
@@ -165,8 +268,8 @@ def heuristic_classifier(prompt: str, context: Optional[Dict[str, Any]] = None) 
     text = prompt.lower()
     word_count = len(prompt.split())
 
-    # Check for file path patterns (e.g., architecture.md, security.txt) to prevent keyword collision
-    file_path_pattern = r"[\w./\\-]+\.(?:md|ts|tsx|js|jsx|json|py|html|css|yml|yaml|toml|sql)\b"
+    # Check for file path patterns to prevent keyword collision
+    file_path_pattern = r"[\w./\\-]+\.(?:md|ts|tsx|js|jsx|json|py|html|css|yml|yaml|toml|sql|rs|c|h|cpp|hpp)\b"
     file_paths_found = re.findall(file_path_pattern, text)
     sanitized_text = text
     for fp in file_paths_found:
@@ -174,55 +277,58 @@ def heuristic_classifier(prompt: str, context: Optional[Dict[str, Any]] = None) 
 
     # High complexity / architecture signals
     high_keywords = [
-        r"\barquitetura\b", r"\barchitecture\b", r"\bredesign\b", r"\breestruturar\b",
-        r"\breestruture\b", r"\brefatoração completa\b", r"\bsystem design\b",
-        r"\bsegurança\b", r"\bsecurity audit\b", r"\bvulnerability\b", r"\bvulnerabilidade\b",
-        r"\bconcorrência\b", r"\bdeadlock\b", r"\brace condition\b", r"\bdistributed\b",
-        r"\bdistribuído\b", r"\bbenchmark de arquitetura\b", r"\bestratégia\b", r"\bstrategy\b",
-        r"\bconsultor\b", r"\bconsultant\b", r"\bcomplex debugging\b", r"\bmigração de banco\b",
-        r"\bbreaking change\b", r"\bbreaking changes\b"
+        r"\barchitecture\b", r"\bredesign\b", r"\bsystem design\b",
+        r"\bsecurity audit\b", r"\bvulnerability\b", r"\bdeadlock\b",
+        r"\brace condition\b", r"\bdistributed\b", r"\bbenchmark.*architecture\b",
+        r"\bstrategy\b", r"\bconsultant\b", r"\bcomplex debugging\b",
+        r"\bbreaking change\b", r"\bbreaking changes\b", r"\bconsensus\b",
+        r"\bmigration\b", r"\brestructure\b", r"\brearchitect\b",
+        r"\bsecurity overhaul\b", r"\bdeep diagnostic\b", r"\broot cause\b"
     ]
 
-    # Medium implementation signals (active coding verbs and inflections)
+    # Medium implementation signals (active coding verbs)
     medium_keywords = [
-        r"\bimplementar\b", r"\bimplemente\b", r"\bimplement\b", r"\bcriar\b", r"\bcrie\b",
-        r"\bcria\b", r"\bcreate\b", r"\bdesenvolver\b", r"\bdesenvolva\b", r"\bdevelop\b",
-        r"\bendpoint\b", r"\bcontroller\b", r"\bservice\b", r"\btestes\b", r"\btests\b",
-        r"\brefatorar\b", r"\brefatore\b", r"\brefactor\b", r"\bcorrigir bug\b", r"\bfix bug\b",
-        r"\badicionar\b", r"\badicione\b", r"\bmigrar\b", r"\bmigre\b", r"\bconstruir\b",
-        r"\bconstrua\b", r"\bwebhook\b", r"\bcrud\b", r"\bworker\b", r"\bqueue\b", r"\bfila\b"
+        r"\bimplement\b", r"\bcreate\b", r"\bdevelop\b", r"\bdevelopp\b",
+        r"\bendpoint\b", r"\bcontroller\b", r"\bservice\b", r"\btests?\b",
+        r"\brefactor\b", r"\bfix.*bug\b", r"\baddd\b", r"\bmigrat\b",
+        r"\bbuild\b", r"\bwebhook\b", r"\bcrud\b", r"\bworker\b",
+        r"\bqueue\b", r"\bfunction\b", r"\bwrite\b", r"\bcode\b",
+        r"\bimplement\b", r"\bfeature\b", r"\bunit test\b",
+        r"\brefactor\b", r"\bmodify\b", r"\bchange\b"
     ]
 
-    # Multi-file or wide-scope signals (overrides "pequeno ajuste")
+    # Multi-file or wide-scope signals
     wide_scope_signals = [
-        r"\btodos os\b", r"\btodas as\b", r"\bem todos\b", r"\bem todas\b",
-        r"\b\d+\s+controllers\b", r"\b\d+\s+arquivos\b", r"\bvários arquivos\b",
-        r"\bmúltiplos arquivos\b", r"\bno projeto inteiro\b", r"\bacross the project\b"
+        r"\ball\b.*\bfiles?\b", r"\bevery\b.*\bfile\b",
+        r"\bproject\b.*\bwide\b", r"\bacross.*\bproject\b",
+        r"\bwhole\b.*\bcodebase\b", r"\bentire\b.*\bproject\b",
+        r"\bmultiple.*\bfiles?\b", r"\bmany.*\bfiles?\b"
     ]
 
     # Low complexity / quick inspection signals
     low_keywords = [
-        r"\blistar\b", r"\bliste\b", r"\blist\b", r"\bverifique\b", r"\bverificar\b",
-        r"\bveja\b", r"\bview\b", r"\bler\b", r"\bleia\b", r"\bread\b", r"\bgrep\b",
-        r"\bprocurar\b", r"\bprocure\b", r"\bsearch\b", r"\bonde está\b", r"\bwhere is\b",
-        r"\bo que é\b", r"\bwhat is\b", r"\bformatar\b", r"\bformat\b", r"\blint\b",
-        r"\bsyntax\b", r"\bsintaxe\b", r"\bpequeno ajuste\b", r"\btypo\b", r"\bcomente\b",
-        r"\bdocstring\b", r"\brenomear variável\b", r"\bquick test\b", r"\bstatus\b",
-        r"\bcomo rodar\b", r"\bmostrar arquivo\b", r"\bmostre o arquivo\b", r"\bimprimir\b",
-        r"\bimprima\b"
+        r"\blist\b", r"\bview\b", r"\bread\b", r"\blea\b",
+        r"\bgrep\b", r"\bsearch\b", r"\bfind\b", r"\bwhere\b",
+        r"\bwhat is\b", r"\bformat\b", r"\blint\b",
+        r"\bsyntax\b", r"\btypo\b", r"\bdocstring\b",
+        r"\bquick test\b", r"\bstatus\b", r"\bshow\b",
+        r"\bprint\b", r"\bcheck\b", r"\bverify\b", r"\bconfirm\b",
+        r"\bexplain\b", r"\bdescribe\b", r"\bsummary\b",
+        r"\breadme\b", r"\bdemo\b", r"\bsetup\b"
     ]
 
-    # Explicit score evaluation using sanitized_text (prevents path collisions)
+    # Scoring
     high_hits = sum(1 for kw in high_keywords if re.search(kw, sanitized_text))
     med_hits = sum(1 for kw in medium_keywords if re.search(kw, text))
     low_hits = sum(1 for kw in low_keywords if re.search(kw, text))
     has_wide_scope = any(re.search(ws, text) for ws in wide_scope_signals)
-    # If it's a read-only search/grep and no writing verbs exist, searching all files is still Low tier
-    is_pure_search = (low_hits >= 1 and med_hits == 0 and any(re.search(s, text) for s in [r"\bgrep\b", r"\bprocurar\b", r"\bsearch\b", r"\blistar\b"]))
+
+    # Pure search/skip detection
+    is_pure_search = (low_hits >= 1 and med_hits == 0 and any(re.search(s, text) for s in [r"\bgrep\b", r"\bsearch\b", r"\blist\b", r"\bfind\b"]))
     if is_pure_search:
         has_wide_scope = False
 
-    # Complexity estimation: Writing takes precedence over reading; wide scope escalates to Medium
+    # Decision logic: writing > reading; wide scope escalates
     if high_hits >= 2 or (high_hits >= 1 and word_count > 40):
         tier = "high"
         confidence = min(0.95, 0.70 + (high_hits * 0.10))
@@ -231,13 +337,13 @@ def heuristic_classifier(prompt: str, context: Optional[Dict[str, Any]] = None) 
         tier = "medium"
         confidence = min(0.95, 0.75 + (med_hits * 0.08))
         if has_wide_scope:
-            reason = "Wide project scope / multi-file modification detected. Promoted to Medium tier executor."
+            reason = "Wide project scope / multi-file modification detected. Promoted to Medium tier."
         else:
-            reason = f"Standard implementation/coding task ({med_hits} action indicators). Best handled by Medium executor."
+            reason = f"Standard implementation/coding task ({med_hits} action indicators)."
     elif low_hits >= 1 and high_hits == 0 and med_hits == 0 and not has_wide_scope and word_count < 40:
         tier = "low"
         confidence = min(0.95, 0.75 + (low_hits * 0.08))
-        reason = f"Identified simple/read-only/triage markers ({low_hits} indicators). Ideal for Low tier to save tokens."
+        reason = f"Simple/read-only/triage markers ({low_hits} indicators). Ideal for Low tier to save tokens."
     else:
         tier = "medium"
         confidence = 0.85
@@ -265,15 +371,16 @@ def heuristic_classifier(prompt: str, context: Optional[Dict[str, Any]] = None) 
     }
 
 
-def route_task(prompt: str, context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+def route_task(prompt: str, context: Optional[Dict[str, Any]] = None, use_neural: bool = False) -> Dict[str, Any]:
     """
-    Intelligent Hybrid Ensemble:
-    1. Primary: Queries native Kev-0.8B System One decision model (/v1/systemone) on local GPU.
-    2. Fallback: Uses deterministic semantic heuristic engine if Ollama is offline or times out.
+    Intelligent Hybrid Routing:
+    1. Primary: Deterministic heuristic engine (instant 0.2ms, offline, zero tokens)
+    2. Optional: LM Studio decision model if use_neural=True is explicitly set
     """
-    kev_result = query_kev_systemone(prompt)
-    if kev_result:
-        return kev_result
+    if use_neural:
+        lmstudio_result = query_lmstudio_decision(prompt)
+        if lmstudio_result:
+            return lmstudio_result
 
     return heuristic_classifier(prompt, context)
 
@@ -286,19 +393,20 @@ def evaluate_uncertainty(subagent_output: str, current_tier: str = "low") -> Dic
     text = subagent_output.lower()
 
     uncertainty_patterns = [
-        "não tenho certeza", "nao tenho certeza", "não consegui", "nao consegui",
-        "não tenho como saber", "nao tenho como saber", "talvez", "dúvida", "duvida",
         "i am unsure", "i am not certain", "cannot determine", "uncertain",
         "failed to resolve", "could not fix", "unknown error",
-        "não foi possível encontrar", "nao foi possivel encontrar",
-        "não sei", "nao sei", "hesito", "hesitacao", "limitation",
-        "error:", "exception:", "traceback", "stacktrace", "failed with code 1",
-        "syntaxerror", "typeerror", "referenceerror", "test failed"
+        "i do not know", "i don't know", "i'm not sure",
+        "not possible", "impossible", "no way to",
+        "error:", "exception:", "traceback", "stacktrace",
+        "syntaxerror", "typeerror", "referenceerror", "test failed",
+        "je ne sais pas", "je ne peux pas", "impossible de",
+        "incertain", "doute", "hésitation"
     ]
 
     incomplete_markers = [
-        "todo:", "fixme:", "implement later", "a ser implementado",
-        "placeholder", "[falta implementar]"
+        "todo:", "fixme:", "implement later", "to be implemented",
+        "placeholder", "[to be implemented]", "[à implémenter]",
+        "[faut implémenter]", "[à faire]"
     ]
 
     matched_uncertainty = [p for p in uncertainty_patterns if p in text]
@@ -343,7 +451,7 @@ def format_consultation(task: str, current_findings: str, dilemma: str) -> Dict[
     return {
         "formatted_prompt": template,
         "target_agent": "consultant-high",
-        "target_model": "Gemini 3.8 Flash (High)"
+        "target_model": DECISION_MODEL
     }
 
 
@@ -352,6 +460,38 @@ def format_consultation(task: str, current_findings: str, dilemma: str) -> Dict[
 # ==============================================================================
 
 TOOLS = [
+    {
+        "name": "execute_local_task",
+        "description": "Executes an easy/mechanical task, code generation, refactoring, or explanation directly on the active local model in LM Studio. Consumes zero cloud tokens.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "prompt": {
+                    "type": "string",
+                    "description": "The exact instruction, code task, or query to execute on the local model."
+                },
+                "system_prompt": {
+                    "type": "string",
+                    "description": "Optional custom system instructions for the local model."
+                },
+                "context": {
+                    "type": "string",
+                    "description": "Optional surrounding code, file snippets, or error messages."
+                },
+                "max_tokens": {
+                    "type": "integer",
+                    "default": 2048,
+                    "description": "Maximum tokens to generate (default: 2048)."
+                },
+                "temperature": {
+                    "type": "number",
+                    "default": 0.2,
+                    "description": "Sampling temperature (default: 0.2 for deterministic code)."
+                }
+            },
+            "required": ["prompt"]
+        }
+    },
     {
         "name": "classify_and_route_task",
         "description": "Analyzes a prompt or task description and determines the optimal model tier (Low, Medium, High) to maximize speed and minimize token costs.",
@@ -414,7 +554,7 @@ TOOLS = [
     },
     {
         "name": "get_tier_status",
-        "description": "Returns the status of local Ollama connectivity, Kev decision model availability, and active router configurations.",
+        "description": "Returns the status of LM Studio connectivity, active loaded model, available models, and router configurations.",
         "inputSchema": {
             "type": "object",
             "properties": {}
@@ -424,7 +564,20 @@ TOOLS = [
 
 
 def handle_tool_call(name: str, args: Dict[str, Any]) -> Any:
-    if name == "classify_and_route_task":
+    if name == "execute_local_task":
+        prompt = args.get("prompt", "")
+        sys_prompt = args.get("system_prompt")
+        context = args.get("context")
+        max_tokens = args.get("max_tokens", 2048)
+        temperature = args.get("temperature", 0.2)
+        return execute_local_task(
+            prompt=prompt,
+            system_prompt=sys_prompt,
+            context=context,
+            max_tokens=max_tokens,
+            temperature=temperature
+        )
+    elif name == "classify_and_route_task":
         prompt = args.get("prompt", "")
         ctx = args.get("context", {})
         return route_task(prompt, ctx)
@@ -438,16 +591,19 @@ def handle_tool_call(name: str, args: Dict[str, Any]) -> Any:
         dilemma = args.get("dilemma", "")
         return format_consultation(task, findings, dilemma)
     elif name == "get_tier_status":
-        ollama_ok, kev_ok = check_ollama_kev_available()
+        active_model, warning = detect_active_model()
+        lm_running, available_models = check_lmstudio_available()
         return {
-            "ollama_running": ollama_ok,
-            "kev_model_ready": kev_ok,
-            "ollama_host": OLLAMA_HOST,
-            "active_engine": "kev_systemone" if (ollama_ok and kev_ok) else "local_heuristic (resilient fallback)",
+            "lmstudio_running": lm_running,
+            "active_model": active_model,
+            "available_models": available_models,
+            "warning": warning,
+            "lmstudio_host": LMSTUDIO_HOST,
+            "routing_engine": "local_heuristic (default 0.2ms)",
             "tier_hierarchy": {
-                "low": "Gemini 3.8 Flash (Low) - Quick inspection, search, localized edits (85% token savings)",
-                "medium": "Gemini 3.8 Flash (Medium) - Main feature executor, tests, refactoring",
-                "high": "Gemini 3.8 Flash (High) - Strategic architect, complex edge cases, consultant"
+                "low": "Local LM Studio Model (execute_local_task) - 0 cloud tokens",
+                "medium": "Task Runner Medium (Flash) - Main feature executor, tests, refactoring",
+                "high": "Consultant High (Pro / Argon) - Strategic architect, complex edge cases"
             }
         }
     else:
@@ -456,9 +612,9 @@ def handle_tool_call(name: str, args: Dict[str, Any]) -> Any:
 
 def run_mcp_server():
     """Main loop handling JSON-RPC 2.0 messages from stdin."""
-    log("Starting Antigravity Tiered Router MCP Server...")
-    ollama_ok, kev_ok = check_ollama_kev_available()
-    log(f"Ollama running: {ollama_ok}, Kev model ready: {kev_ok}")
+    log("Starting Antigravity Tiered Router MCP Server (LM Studio)...")
+    lm_ok, models = check_lmstudio_available()
+    log(f"LM Studio running: {lm_ok}, Models: {models}")
 
     while True:
         line = sys.stdin.readline()
@@ -486,7 +642,7 @@ def run_mcp_server():
                     "protocolVersion": "2024-11-05",
                     "capabilities": {"tools": {}},
                     "serverInfo": {
-                        "name": "antigravity-tiered-router",
+                        "name": "antigravity-tiered-router-lmstudio",
                         "version": "1.0.0"
                     }
                 }
@@ -495,7 +651,6 @@ def run_mcp_server():
             sys.stdout.flush()
 
         elif method == "notifications/initialized":
-            # Client acknowledge, no response required
             pass
 
         elif method == "tools/list":

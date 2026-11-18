@@ -90,11 +90,13 @@ def execute_local_task(
     context: Optional[str] = None,
     max_tokens: int = 2048,
     temperature: float = 0.2,
+    fast: bool = False,
     host: str = LMSTUDIO_HOST
 ) -> Dict[str, Any]:
     """
     Executes a task locally on the active LM Studio model (0 cloud tokens).
     Handles reasoning models (Qwen 3.6 / R1) and standard LLMs seamlessly.
+    fast: If True, instructs the model to produce raw code directly without verbose reasoning/explanations.
     """
     active_model, warning = detect_active_model(host)
     if not active_model:
@@ -105,10 +107,20 @@ def execute_local_task(
             "action": "Please load a model in LM Studio (e.g. Qwen 3.6) and retry, or fallback to cloud execution."
         }
 
-    sys_content = system_prompt or (
-        "You are an expert, concise software engineer. Provide direct, working code and clear explanations. "
-        "Do not output unrequested chatter."
-    )
+    if fast:
+        sys_content = system_prompt or (
+            "You are an ultra-fast code generator. Output ONLY the requested code block. "
+            "Skip internal reasoning, skip explanations, output clean working code immediately."
+        )
+        temp = 0.1 if temperature == 0.2 else temperature
+        limit_tokens = min(max_tokens, 1024)
+    else:
+        sys_content = system_prompt or (
+            "You are an expert, concise software engineer. Provide direct, working code and clear explanations. "
+            "Do not output unrequested chatter."
+        )
+        temp = temperature
+        limit_tokens = max_tokens
 
     full_prompt = prompt
     if context:
@@ -122,8 +134,8 @@ def execute_local_task(
     payload = {
         "model": active_model,
         "messages": messages,
-        "temperature": temperature,
-        "max_tokens": max_tokens,
+        "temperature": temp,
+        "max_tokens": limit_tokens,
         "stream": False
     }
 
@@ -487,6 +499,11 @@ TOOLS = [
                     "type": "number",
                     "default": 0.2,
                     "description": "Sampling temperature (default: 0.2 for deterministic code)."
+                },
+                "fast": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "If true, optimizes for maximum speed (minimal reasoning tokens, direct code output)."
                 }
             },
             "required": ["prompt"]
@@ -570,12 +587,14 @@ def handle_tool_call(name: str, args: Dict[str, Any]) -> Any:
         context = args.get("context")
         max_tokens = args.get("max_tokens", 2048)
         temperature = args.get("temperature", 0.2)
+        fast = args.get("fast", False)
         return execute_local_task(
             prompt=prompt,
             system_prompt=sys_prompt,
             context=context,
             max_tokens=max_tokens,
-            temperature=temperature
+            temperature=temperature,
+            fast=fast
         )
     elif name == "classify_and_route_task":
         prompt = args.get("prompt", "")

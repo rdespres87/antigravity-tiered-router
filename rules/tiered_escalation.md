@@ -20,6 +20,7 @@ Whenever processing a user request or decomposing a project into subtasks:
    - Use the `classify_and_route_task` tool (or instant regex heuristic) to determine the recommended tier.
    - **If classified as Low (T0/T1)**: Call the MCP tool `call_mcp_tool(ServerName="tiered-router", ToolName="execute_local_task", Arguments={"prompt": ...})`.
      - The active local model in LM Studio executes the task offline at zero token cost.
+     - **Auto-Healing Loop (0 cloud tokens)**: Immediately validate generated code using native linters/compilers (`rtk cargo check`, `rtk cargo test`, `tsc --noEmit`). If errors arise, pass the compiler diagnostic back to `execute_local_task(context=error)` to fix locally. Escalate only after 2 local failures.
      - Verify or integrate the returned code/text.
    - **If classified as Medium (T2)**: Delegate to cloud executor (`task-runner-medium` or self/subagent).
    - **If classified as High (T3)**: Keep execution in the primary session or consult `consultant-high`.

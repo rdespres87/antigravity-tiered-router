@@ -21,3 +21,14 @@ This skill provides operational procedures for using the **Antigravity Tiered Ro
      - Pass accumulated context and error logs to avoid restarting from scratch.
 3. **High Consultation**:
    - When facing architectural trade-offs, call `format_high_consultation` to formulate a concise query for the High tier consultant.
+
+## Operational Flows & On-Ramps
+
+1. **Main Flow (Feature Development)**:
+   - Cadrage / Spec $\rightarrow$ Implementation (Tier 1 local / Tier 2) $\rightarrow$ Adversarial Grill (`grill-orchestrator` if T3) $\rightarrow$ Native validation $\rightarrow$ Phase boundary decision.
+2. **On-Ramp Bug / Regression**:
+   - Write a minimal failing test locally via `execute_local_task` $\rightarrow$ Fix & Auto-heal $\rightarrow$ Verify.
+3. **On-Ramp Architecture / Health**:
+   - Survey with Headroom MCP (`headroom_retrieve`) $\rightarrow$ Assess coupling $\rightarrow$ Gate 1 plan.
+4. **Recommend & Stop**:
+   - When suggesting next steps or answering strategic questions, provide the path, highlight trade-offs, and stop without mutating code until the user approves.

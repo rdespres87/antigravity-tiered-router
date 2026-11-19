@@ -103,5 +103,5 @@ Every development or bug fixing interaction MUST explicitly display progress thr
   1. `### [PHASE 1/5 : CONCEPTION & DÉVELOPPEMENT]` : Architecture & implementation.
   2. `### [PHASE 2/5 : VALIDATION NATIVE & TESTS CI]` : Full toolchain execution (`cargo test && cargo clippy`, `tsc`, `pytest`).
   3. `### [PHASE 3/5 : AUDIT LOCAL IMPITOYABLE (0 TOKENS)]` : LM Studio adversarial review via `execute_local_task`.
-  4. `### [PHASE 4/5 : AUTO-HEALING & CORRECTIFS]` : Direct resolution of any blocking findings.
+  4. `### [PHASE 4/5 : AUTO-HEALING & CORRECTIFS]` : Mandatory step. If `REJECTED`: resolve `[BLOCKING]` defects and re-audit. If `APPROVED`: confirm `No blocking defects detected (Local audit APPROVED on first pass, 0 fixes required)`.
   5. `### [PHASE 5/5 : RAPPORT DÉTAILLÉ & PROTOCOLE DE TEST]` : Comprehensive report including exact automated test commands and step-by-step manual validation scenarios before Gate 3.

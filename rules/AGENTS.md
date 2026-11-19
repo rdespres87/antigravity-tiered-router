@@ -83,3 +83,14 @@ When advising the user on an architectural dilemma, debugging approach, or workf
 - **CI Validation**: Run tests and linter before staging/committing.
 - **README & Doc Sync**: Update README and documentation alongside any code/feature changes.
 - **Zero Autonomous Commits or Pushes**: Always display diff and obtain user consent before `git commit`, and separate consent before `git push`.
+
+---
+
+## 6. Mandatory Phase Tracking & Detailed Testing Protocol
+
+Every development or bug fixing interaction MUST explicitly display progress through clear banners:
+1. `[PHASE 1/5 : CONCEPTION & DÉVELOPPEMENT]` : Architecture & implementation.
+2. `[PHASE 2/5 : VALIDATION NATIVE & TESTS CI]` : Full toolchain execution (`cargo test && cargo clippy`, `tsc`, `pytest`).
+3. `[PHASE 3/5 : AUDIT LOCAL IMPITOYABLE (0 TOKENS)]` : LM Studio adversarial review via `execute_local_task`.
+4. `[PHASE 4/5 : AUTO-HEALING & CORRECTIFS]` : Direct resolution of any blocking findings.
+5. `[PHASE 5/5 : RAPPORT DÉTAILLÉ & PROTOCOLE DE TEST]` : Comprehensive report including exact automated test commands and step-by-step manual validation scenarios before Gate 3.

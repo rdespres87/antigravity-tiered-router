@@ -20,8 +20,10 @@ Unlike traditional static proxies, it incorporates an **active runtime uncertain
 ### Key Capabilities
 - **Zero-Token Neural Triage**: Uses Jared Palmer's native **Kev-0.8B** decision model via Ollama's `/v1/systemone` endpoint. It produces calibrated choice probabilities in a single forward pass without autoregressive token generation.
 - **Deterministic Heuristic Engine**: Sub-millisecond (0.2 ms) offline regex boundary parser acting as an instant failover if the local Ollama daemon is offline.
+- **Local Model Offloading (0 Cloud Tokens)**: Offload mechanical coding tasks, boilerplate, unit tests, and code generation locally to LM Studio via the `execute_local_task` MCP tool (supporting Qwen 3.6, DeepSeek-R1, and fast code generation modes).
+- **Mandatory Merciless Local Audit**: Built-in quality gate running an adversarial, zero-cloud-token code audit on the local model after every feature development or bug fix before git commit.
 - **Active Antiback Protocol**: Continuous self-assessment tool (`evaluate_task_uncertainty`) preventing subagent loops and hallucinatory retries.
-- **Measurable Token Economy**: Yields **26.7% to 84% token savings** across typical day-to-day software engineering tasks.
+- **Measurable Token Economy**: Yields **26.7% to 100% token savings** across typical day-to-day software engineering tasks.
 - **Telemetry Dashboard**: Built-in real-time monitoring interface served locally on port 8085.
 
 ---
@@ -67,11 +69,11 @@ flowchart TD
 
 ## The 3 Operational Tiers
 
-| Tier | Assigned Model | Subagent Persona | Target Task Scope | Token Economy |
+| Tier | Assigned Model / Target | Subagent / Mechanism | Target Task Scope | Token Economy |
 | :--- | :--- | :--- | :--- | :---: |
-| **Tier 1 (Low)** | Gemini 3.8 Flash (Low) | `task-runner-low` | Read-only tasks, file search, grep, syntax checks, log inspection, documentation typos. | **~84% savings** |
-| **Tier 2 (Medium)** | Gemini 3.8 Flash (Medium) | `task-runner-medium` | Feature development, writing endpoints, unit tests, bug fixes, localized refactoring. | **~55% savings** |
-| **Tier 3 (High)** | Gemini 3.8 Flash (High) | `consultant-high` | System architecture, distributed consensus, security audits, database migrations. | Baseline (Full reasoning) |
+| **Tier 1 (Low)** | **Local LM Studio Model** (e.g. Qwen 3.6 35B) / Gemini 3.8 Flash Low | `execute_local_task` / `task-runner-low` | Mechanical tasks, standalone functions, unit tests, syntax checks, **merciless local audit**. | **100% saved** (Local) / **~84%** (Cloud) |
+| **Tier 2 (Medium)** | Gemini 3.8 Flash (Medium) | `task-runner-medium` | Multi-file features, endpoint development, standard bug fixing, localized refactoring. | **~55% savings** |
+| **Tier 3 (High)** | Claude / Gemini 4 Argon / Gemini 3.8 Flash High | `consultant-high` / Primary | System architecture, distributed consensus, security audits, database migrations. | Baseline (Full reasoning) |
 
 ---
 

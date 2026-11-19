@@ -21,7 +21,10 @@ Unlike traditional static proxies, it incorporates an **active runtime uncertain
 - **Zero-Token Neural Triage**: Uses Jared Palmer's native **Kev-0.8B** decision model via Ollama's `/v1/systemone` endpoint. It produces calibrated choice probabilities in a single forward pass without autoregressive token generation.
 - **Deterministic Heuristic Engine**: Sub-millisecond (0.2 ms) offline regex boundary parser acting as an instant failover if the local Ollama daemon is offline.
 - **Local Model Offloading (0 Cloud Tokens)**: Offload mechanical coding tasks, boilerplate, unit tests, and code generation locally to LM Studio via the `execute_local_task` MCP tool (supporting Qwen 3.6, DeepSeek-R1, and fast code generation modes).
-- **Mandatory Merciless Local Audit**: Built-in quality gate running an adversarial, zero-cloud-token code audit on the local model after every feature development or bug fix before git commit.
+- **Mandatory Merciless Local Audit**: Built-in quality gate running an adversarial, zero-cloud-token code audit on the local model after every feature development or bug fix before git commit, using the comprehensive 7-axis rubric (anti-god files >400 LOC, algorithmic performance, memory pre-allocation, exhaustive tests, error resilience, concurrency, and craft).
+- **Continuous 5-Phase Lifecycle Tracking**: Enforces deterministic transitions ($1 \rightarrow 2 \rightarrow 3 \rightarrow 4 \rightarrow 5$) with banners emitted strictly on phase transitions.
+- **Two-Stage Consent Gate (`ask_question`)**: Strictly separates local commit authorization (Gate A) from remote push authorization (Gate B) via native interactive choice dialogs.
+- **Mandatory New Project Scaffolding On-Ramp**: Strictly forbids writing domain logic or features on fresh repositories before persistent state architecture (`AGENTS.md`, `docs/agent/`) is established via `project-scaffold`.
 - **Active Antiback Protocol**: Continuous self-assessment tool (`evaluate_task_uncertainty`) preventing subagent loops and hallucinatory retries.
 - **Measurable Token Economy**: Yields **26.7% to 100% token savings** across typical day-to-day software engineering tasks.
 - **Telemetry Dashboard**: Built-in real-time monitoring interface served locally on port 8085.

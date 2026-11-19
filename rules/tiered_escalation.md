@@ -89,8 +89,13 @@ When advising the user on an architectural dilemma, debugging approach, or workf
 ## 6. Mandatory Phase Tracking & Detailed Testing Protocol
 
 Every development or bug fixing interaction MUST explicitly display progress through clear banners:
-1. `[PHASE 1/5 : CONCEPTION & DÉVELOPPEMENT]` : Architecture & implementation.
-2. `[PHASE 2/5 : VALIDATION NATIVE & TESTS CI]` : Full toolchain execution (`cargo test && cargo clippy`, `tsc`, `pytest`).
-3. `[PHASE 3/5 : AUDIT LOCAL IMPITOYABLE (0 TOKENS)]` : LM Studio adversarial review via `execute_local_task`.
-4. `[PHASE 4/5 : AUTO-HEALING & CORRECTIFS]` : Direct resolution of any blocking findings.
-5. `[PHASE 5/5 : RAPPORT DÉTAILLÉ & PROTOCOLE DE TEST]` : Comprehensive report including exact automated test commands and step-by-step manual validation scenarios before Gate 3.
+- **Zero Silent Tool Calls (MANDATORY FIRST-TOKEN OUTPUT)**: The agent is strictly forbidden from invoking tools silently without preceding visible prose.
+- **First Visible Markdown Token**: At the very start of every turn and **BEFORE invoking any tool**, you MUST output visible text in the chat declaring the active phase banner in Markdown:
+  `### [PHASE 1/5 : CONCEPTION & DÉVELOPPEMENT]` (or active phase `[PHASE 2/5]`, `[PHASE 3/5]`, etc.)
+  followed by a one-sentence summary of the action being taken.
+- The 5 phases:
+  1. `### [PHASE 1/5 : CONCEPTION & DÉVELOPPEMENT]` : Architecture & implementation.
+  2. `### [PHASE 2/5 : VALIDATION NATIVE & TESTS CI]` : Full toolchain execution (`cargo test && cargo clippy`, `tsc`, `pytest`).
+  3. `### [PHASE 3/5 : AUDIT LOCAL IMPITOYABLE (0 TOKENS)]` : LM Studio adversarial review via `execute_local_task`.
+  4. `### [PHASE 4/5 : AUTO-HEALING & CORRECTIFS]` : Direct resolution of any blocking findings.
+  5. `### [PHASE 5/5 : RAPPORT DÉTAILLÉ & PROTOCOLE DE TEST]` : Comprehensive report including exact automated test commands and step-by-step manual validation scenarios before Gate 3.

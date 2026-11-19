@@ -73,3 +73,13 @@ Organize tasks along clear pathways rather than executing isolated ad-hoc comman
 When advising the user on an architectural dilemma, debugging approach, or workflow selection:
 - Clearly state the recommended flow, why competing alternatives were ruled out, and the next command/step.
 - **Stop and await confirmation** before creating or modifying code files, running heavy builds, or firing autonomous multi-agent loops prematurely.
+
+---
+
+## 5. Git Commit Hygiene & Quality Gates (Universal Standard)
+
+- **Atomic Commits**: Sliced into small, single-purpose changes. Never mix a bug fix with a new feature or unaligned changes.
+- **Bisectability**: Every commit must independently compile and pass CI/tests.
+- **CI Validation**: Run tests and linter before staging/committing.
+- **README & Doc Sync**: Update README and documentation alongside any code/feature changes.
+- **Zero Autonomous Commits or Pushes**: Always display diff and obtain user consent before `git commit`, and separate consent before `git push`.

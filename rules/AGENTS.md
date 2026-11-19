@@ -30,8 +30,9 @@ Whenever processing a user request or decomposing a project into subtasks:
    - If the local model output is incomplete, contains errors, or expresses doubt, inspect with `evaluate_task_uncertainty` and escalate to Medium.
    - If Medium encounters an architectural roadblock, format consultation with `format_high_consultation` and consult High.
 
-3. **Context Preservation**:
+3. **Context Preservation & Headroom Compression Protocol**:
    - During escalation, never restart from scratch. Pass accumulated code findings, investigated files, and error traces to the higher tier.
+   - **Mandatory Headroom Compression (>80 lines)**: For any payload (file reads, compiler logs, `git diff`) exceeding 80 lines or 800 tokens, you MUST invoke `call_mcp_tool(ServerName="headroom", ToolName="headroom_compress", Arguments={"content": ...})`. Reason on the compressed output and retain the hash for retrieval (`headroom_retrieve`).
 
 ---
 

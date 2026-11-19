@@ -82,7 +82,14 @@ When advising the user on an architectural dilemma, debugging approach, or workf
 - **Bisectability**: Every commit must independently compile and pass CI/tests.
 - **CI Validation**: Run tests and linter before staging/committing.
 - **README & Doc Sync**: Update README and documentation alongside any code/feature changes.
-- **Zero Autonomous Commits or Pushes**: Always display diff and obtain user consent before `git commit`, and separate consent before `git push`.
+- **Zero Autonomous Commits or Pushes & Strict Separation**:
+  - Never bundle commit and push in a single request. They are two independent gates.
+  - **Gate A (Local Commit)**: Display unified diff, propose message, and invoke `ask_question`:
+    - Question: `"Souhaitez-vous enregistrer ce commit atomique localement ?"`
+    - Options: `["(Recommended) Oui, enregistrer le commit local (sans push)", "Ajuster le message ou le périmètre du commit", "Annuler / apporter d'autres modifications"]`
+  - **Gate B (Remote Push - Dedicated Turn)**: Keep commits local by default to preserve CI runner quotas. In a separate turn, ask via `ask_question`:
+    - Question: `"Le commit local est enregistré. Souhaitez-vous pousser les modifications vers origin/main ?"`
+    - Options: `["(Recommended) Non, conserver en local (préserve les quotas des runners CI)", "Oui, pousser vers origin/main"]`
 
 ---
 

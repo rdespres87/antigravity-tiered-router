@@ -96,10 +96,9 @@ When advising the user on an architectural dilemma, debugging approach, or workf
 ## 6. Mandatory Phase Tracking & Detailed Testing Protocol
 
 Every development or bug fixing interaction MUST explicitly display progress through clear banners:
-- **Zero Silent Tool Calls (MANDATORY FIRST-TOKEN OUTPUT)**: The agent is strictly forbidden from invoking tools silently without preceding visible prose.
-- **First Visible Markdown Token**: At the very start of every turn and **BEFORE invoking any tool**, you MUST output visible text in the chat declaring the active phase banner in Markdown:
-  `### [PHASE 1/5 : CONCEPTION & DÉVELOPPEMENT]` (or active phase `[PHASE 2/5]`, `[PHASE 3/5]`, etc.)
-  followed by a one-sentence summary of the action being taken.
+- **Phase Transition Banners Only (Never Repeat within the Same Phase)**:
+  - The Markdown banner `### [PHASE X/5 : ...]` MUST be emitted once at each phase transition (upon entering Phase 1, Phase 2, Phase 3, Phase 4, or Phase 5, or upon returning to Phase 1 for fixes).
+  - Do NOT repeat the `### [PHASE X/5]` banner across multiple intermediate tool calls within the same phase. Once the active phase is declared, proceed with tools and concise updates.
 - The 5 phases:
   1. `### [PHASE 1/5 : CONCEPTION & DÉVELOPPEMENT]` : Architecture & implementation.
   2. `### [PHASE 2/5 : VALIDATION NATIVE & TESTS CI]` : Full toolchain execution (`cargo test && cargo clippy`, `tsc`, `pytest`).

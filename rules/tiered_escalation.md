@@ -35,21 +35,30 @@ Whenever processing a user request or decomposing a project into subtasks:
 
 ---
 
-## 3. Standard Execution Flows & On-Ramps
+## 3. Standard Execution Flows & Mandatory Local Audit
 
+### Mandatory Post-Dev / Post-Fix Merciless Local Audit (0 Cloud Tokens)
+Across **every project**, immediately after completing any code development, refactoring, or bug fix (and before any git commit or final validation):
+1. **Trigger Local Audit**: Collect the `git diff` and invoke the local model via `execute_local_task` (or skill `merciless-local-audit`). Prompt the local model to act as a merciless, ultra-strict auditor checking for language idiomaticity, boundary errors, silent failures, race conditions, and missing tests.
+2. **Auto-Healing**: If the audit returns `[BLOCKING]` defects, resolve them immediately using the local auto-healing loop.
+3. **Escalation**: Only proceed to commit validation or user feedback once the audit verdict is clean (`APPROVED`). If LM Studio is offline, warn the user and fallback to a cloud subagent.
+
+### Standard On-Ramps
 Organize tasks along clear pathways rather than executing isolated ad-hoc commands:
 
 - **Main Flow (Feature: Concept to Production)**:
   1. *Framing & Spec*: Draft architecture artifact / spec (`RequestFeedback: true`).
   2. *Implementation*: Offload standalone modules/tests to Tier 1 local model or Tier 2 subagent.
-  3. *Adversarial Verification*: Trigger `grill-orchestrator` (Cross-family Maker vs Inquisitor, black-box red-team test generation).
-  4. *Validation & Mutation Testing*: Native test suite (`rtk cargo test`, `tsc`) + mutation testing oracle (`cargo mutants --in-diff` for Rust).
-  5. *Phase Boundary*: Choose `/compact` or `HANDOFF` before starting next phase.
+  3. *Merciless Local Audit*: Mandatory zero-token audit of `git diff` via `execute_local_task`.
+  4. *Adversarial Verification*: Trigger `grill-orchestrator` (Cross-family Maker vs Inquisitor, black-box red-team test generation) for critical components.
+  5. *Validation & Mutation Testing*: Native test suite (`rtk cargo test`, `tsc`) + mutation testing oracle (`cargo mutants --in-diff` for Rust).
+  6. *Phase Boundary*: Choose `/compact` or `HANDOFF` before starting next phase.
 
 - **On-Ramp Bug / Regression**:
   1. Reproduce with minimal isolated test case (Tier 1 local model at 0 tokens).
   2. Implement fix with local auto-healing loop.
-  3. Validate test pass and run clippy/linter.
+  3. *Merciless Local Audit*: Mandatory local audit of fix diff via `execute_local_task`.
+  4. Validate test pass and run clippy/linter.
 
 - **On-Ramp Architecture & Codebase Health**:
   1. Retrieve architectural memory via Headroom (`headroom_retrieve`).

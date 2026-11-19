@@ -24,10 +24,17 @@ This skill provides operational procedures for using the **Antigravity Tiered Ro
 
 ## Operational Flows & On-Ramps
 
+### Mandatory Post-Dev / Post-Fix Merciless Local Audit (0 Cloud Tokens)
+Across **every project**, immediately after completing any code development, refactoring, or bug fix (and before any git commit or final validation):
+1. Collect the `git diff` and invoke the local model via `execute_local_task` (or skill `merciless-local-audit`).
+2. The local model acts as an uncompromising code auditor checking for language idiomaticity, boundary errors, silent failures, race conditions, and missing tests.
+3. If `[BLOCKING]` defects are found, auto-heal locally and re-audit before proceeding.
+
+### Standard Flows
 1. **Main Flow (Feature Development)**:
-   - Cadrage / Spec $\rightarrow$ Implementation (Tier 1 local / Tier 2) $\rightarrow$ Adversarial Grill (`grill-orchestrator` if T3) $\rightarrow$ Native validation $\rightarrow$ Phase boundary decision.
+   - Cadrage / Spec $\rightarrow$ Implementation (Tier 1 local / Tier 2) $\rightarrow$ **Post-Dev Merciless Local Audit (`execute_local_task`, 0 tokens)** $\rightarrow$ Adversarial Grill (`grill-orchestrator` if T3) $\rightarrow$ Native validation $\rightarrow$ Phase boundary decision.
 2. **On-Ramp Bug / Regression**:
-   - Write a minimal failing test locally via `execute_local_task` $\rightarrow$ Fix & Auto-heal $\rightarrow$ Verify.
+   - Write a minimal failing test locally via `execute_local_task` $\rightarrow$ Fix & Auto-heal $\rightarrow$ **Post-Fix Merciless Local Audit (`execute_local_task`, 0 tokens)** $\rightarrow$ Verify.
 3. **On-Ramp Architecture / Health**:
    - Survey with Headroom MCP (`headroom_retrieve`) $\rightarrow$ Assess coupling $\rightarrow$ Gate 1 plan.
 4. **Recommend & Stop**:

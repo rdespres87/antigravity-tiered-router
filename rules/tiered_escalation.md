@@ -47,6 +47,12 @@ Across **every project**, immediately after completing any code development, ref
 ### Standard On-Ramps
 Organize tasks along clear pathways rather than executing isolated ad-hoc commands:
 
+- **On-Ramp New Project Scaffolding (Mandatory First Step)**:
+  1. *Detection*: When bootstrapping a new repository or entering one lacking root `AGENTS.md` or `docs/agent/`.
+  2. *Scaffold*: Trigger skill `project-scaffold` to establish root `AGENTS.md` (declaring global rules apply) and `docs/agent/{SESSION_STATE,TASKS,HANDOFF}.md`.
+  3. *Zero Domain Code*: Never write business logic or features until the persistent scaffolding is committed.
+  4. *Initial Commit Gate*: Confirm initial scaffold commit via Gate A `ask_question`.
+
 - **Main Flow (Feature: Concept to Production)**:
   1. *Framing & Spec*: Draft architecture artifact / spec (`RequestFeedback: true`).
   2. *Implementation*: Offload standalone modules/tests to Tier 1 local model or Tier 2 subagent.

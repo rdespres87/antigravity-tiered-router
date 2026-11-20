@@ -2,7 +2,10 @@
 
 This rule governs how tasks and subagent operations are delegated across model tiers in Antigravity to maximize speed, save 100% cloud tokens on easy tasks, and ensure rock-solid reliability.
 
-## 1. The 3-Tier Hierarchy
+## 1. The 3-Tier Hierarchy & The Ceiling Principle
+
+> [!IMPORTANT]
+> **Ceiling Principle in Antigravity IDE**: Subagents can only be `flash_lite`, `flash`, `pro` (Gemini), or `inherit`. **Claude/GPT cannot be spawned as subagents**. If Gemini Flash is selected in the UI dropdown, the IDE *cannot* automatically delegate up to Claude/GPT. To utilize Claude/GPT for High (Tier 3) tasks, Claude/GPT **must be selected as the main model** in the IDE selector; it will then delegate downward automatically.
 
 | Tier | Execution Target | Mechanism | Role & Best Used For | Token Economy |
 | :--- | :--- | :--- | :--- | :---: |
@@ -13,6 +16,12 @@ This rule governs how tasks and subagent operations are delegated across model t
 ---
 
 ## 2. Delegation & Routing Protocol
+
+### Critical Quota Protocol (< 15% 7d remaining or Generalized RED)
+When cloud 7-day quota has < 15% remaining (or when all active cloud models are in RED status):
+1. **Cloud Model as Pure Orchestrator**: The cloud session is strictly prohibited from generating domain code, implementation algorithms, or long code blocks.
+2. **100% Code Generation Offloaded to LM Studio**: All new code, refactorings, bug fixes, and unit tests MUST be generated via `call_mcp_tool(ServerName="tiered-router", ToolName="execute_local_task", Arguments={"prompt": ...})` at 0 cloud cost.
+3. **Supervisor Workflow**: The cloud model only analyzes requirements, calls `execute_local_task`, persists code using `write_file`/`edit_file`, runs verification commands, and outputs telegraphic responses (< 100 words).
 
 Whenever processing a user request or decomposing a project into subtasks:
 

@@ -13,6 +13,11 @@ This rule governs how tasks and subagent operations are delegated across model t
 | **Tier 2 (Medium)** | Gemini 3.8 Flash / Cloud Subagent | `task-runner-medium` or `pro` subagent | Multi-file features, complex refactoring, test-driven debugging, standard implementation. | ~50-65% savings |
 | **Tier 3 (High)** | Claude / Gemini 4 Argon / Primary Session | Primary Session / `consultant-high` | System architecture, distributed consensus, security audits, database migrations, subtle race conditions. | Baseline |
 
+### Permanent Local-First Worker Policy (All Quota Levels)
+Whenever LM Studio is active (`local=...`), the agent adopts a **Local-First Worker policy across ALL budget tiers**:
+- **Default Worker for Implementation**: LM Studio (`execute_local_task`) is the primary author for all modular functions, algorithms, unit tests, synthetic fixtures, boilerplate, data conversions, docstrings, and conventional commit messages at 0 cloud tokens.
+- **Permanent Cloud Token Shield**: By offloading code drafting permanently to local compute, cloud token consumption is reduced by 70%–90% across every phase, reserving cloud quotas strictly for system architecture (T3), framing, and tool orchestration.
+
 ---
 
 ## 2. Delegation & Routing Protocol

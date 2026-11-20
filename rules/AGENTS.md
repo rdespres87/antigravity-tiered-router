@@ -20,7 +20,11 @@ This rule governs how tasks and subagent operations are delegated across model t
 ### Critical Quota Protocol (< 15% 7d remaining or Generalized RED)
 When cloud 7-day quota has < 15% remaining (or when all active cloud models are in RED status):
 1. **Cloud Model as Pure Orchestrator**: The cloud session is strictly prohibited from generating domain code, implementation algorithms, or long code blocks.
-2. **100% Code Generation Offloaded to LM Studio**: All new code, refactorings, bug fixes, and unit tests MUST be generated via `call_mcp_tool(ServerName="tiered-router", ToolName="execute_local_task", Arguments={"prompt": ...})` at 0 cloud cost.
+2. **100% Code & Text Generation Offloaded to LM Studio**:
+   - All new code, refactorings, bug fixes, and unit tests MUST be generated via `call_mcp_tool(ServerName="tiered-router", ToolName="execute_local_task", Arguments={"prompt": ...})` at 0 cloud cost.
+   - **Commit Messages & Git Drafting**: Before any commit gate, pass the `git diff` to `execute_local_task` to generate the conventional commit title and description locally.
+   - **Documentation & Summaries**: Release notes, docstrings, markdown explanations, and architectural summaries must be drafted by LM Studio.
+   - **Diagnostic & Error Triage**: Feed compiler/linter/test errors to `execute_local_task(context=error)` for root-cause diagnosis and correction before applying changes.
 3. **Supervisor Workflow**: The cloud model only analyzes requirements, calls `execute_local_task`, persists code using `write_file`/`edit_file`, runs verification commands, and outputs telegraphic responses (< 100 words).
 
 Whenever processing a user request or decomposing a project into subtasks:

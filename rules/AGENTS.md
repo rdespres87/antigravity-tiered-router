@@ -9,14 +9,15 @@ This rule governs how tasks and subagent operations are delegated across model t
 
 | Tier | Execution Target | Mechanism | Role & Best Used For | Token Economy |
 | :--- | :--- | :--- | :--- | :---: |
-| **Tier 1 (Low)** | **Local LM Studio Model** (dynamically detected, e.g. Qwen 3.6 35B) | MCP Tool: `execute_local_task` | Mechanical tasks, standalone functions, unit tests, docstrings, boilerplate, syntax fixes, explanations, regex. | **100% cloud tokens saved** (0 cost) |
+| **Tier 1 (Low - Dual Local)** | **Dual Local LM Studio**: <br>• **Maker**: Qwen3.8 27B Splash<br>• **Inquisitor**: Qwen3.6 35B A3B | MCP Tool: `execute_local_task(role="maker"|"inquisitor")` | • **Maker**: Fast code, tests, boilerplate, docstrings.<br>• **Inquisitor**: Merciless audit (Phase 3), logic, race conditions. | **100% cloud tokens saved** (0 cost) |
 | **Tier 2 (Medium)** | Gemini 3.8 Flash / Cloud Subagent | `task-runner-medium` or `pro` subagent | Multi-file features, complex refactoring, test-driven debugging, standard implementation. | ~50-65% savings |
 | **Tier 3 (High)** | Claude / Gemini 4 Argon / Primary Session | Primary Session / `consultant-high` | System architecture, distributed consensus, security audits, database migrations, subtle race conditions. | Baseline |
 
 ### Permanent Local-First Worker Policy (All Quota Levels)
 Whenever LM Studio is active (`local=...`), the agent adopts a **Local-First Worker policy across ALL budget tiers**:
-- **Default Worker for Implementation**: LM Studio (`execute_local_task`) is the primary author for all modular functions, algorithms, unit tests, synthetic fixtures, boilerplate, data conversions, docstrings, and conventional commit messages at 0 cloud tokens.
-- **Permanent Cloud Token Shield**: By offloading code drafting permanently to local compute, cloud token consumption is reduced by 70%–90% across every phase, reserving cloud quotas strictly for system architecture (T3), framing, and tool orchestration.
+- **Default Worker for Implementation (Maker - Qwen3.8 Splash)**: `execute_local_task(role="maker")` is the primary author for all modular functions, algorithms, unit tests, synthetic fixtures, boilerplate, data conversions, docstrings, and conventional commit messages at 0 cloud tokens.
+- **Independent Adversarial Auditor (Inquisitor - Qwen3.6 35B A3B)**: `execute_local_task(role="inquisitor")` executes the mandatory Phase 3 merciless code audit on the diff at 0 cloud tokens, providing cross-model scrutiny without self-bias.
+- **Permanent Cloud Token Shield**: By offloading code drafting and adversarial audit permanently to local compute, cloud token consumption is reduced by 70%–90% across every phase, reserving cloud quotas strictly for system architecture (T3), framing, and tool orchestration.
 
 ---
 

@@ -20,7 +20,7 @@ Unlike traditional static proxies, it incorporates an **active runtime uncertain
 ### Key Capabilities
 - **Zero-Token Neural Triage**: Uses Jared Palmer's native **Kev-0.8B** decision model via Ollama's `/v1/systemone` endpoint. It produces calibrated choice probabilities in a single forward pass without autoregressive token generation.
 - **Deterministic Heuristic Engine**: Sub-millisecond (0.2 ms) offline regex boundary parser acting as an instant failover if the local Ollama daemon is offline.
-- **Local Model Offloading (0 Cloud Tokens)**: Offload mechanical coding tasks, boilerplate, unit tests, and code generation locally to LM Studio via the `execute_local_task` MCP tool (supporting Qwen 3.6, DeepSeek-R1, and fast code generation modes).
+- **Dual Local Engine Offloading (0 Cloud Tokens)**: Seamless dual-model cohabitation and routing in LM Studio via `execute_local_task`. Automatically routes modular code generation, unit tests, and fast implementation to **Maker (Qwen3.8 27B Splash)** with Multi-Token Prediction (MTP) and Apple Neural Engine acceleration, and routes adversarial code audits (Phase 3) and subtle logic scrutiny to **Inquisitor (Qwen3.6 35B A3B)**.
 - **Mandatory Merciless Local Audit**: Built-in quality gate running an adversarial, zero-cloud-token code audit on the local model after every feature development or bug fix before git commit, using the comprehensive 7-axis rubric (anti-god files >400 LOC, algorithmic performance, memory pre-allocation, exhaustive tests, error resilience, concurrency, and craft).
 - **Continuous 5-Phase Lifecycle Tracking**: Enforces deterministic transitions ($1 \rightarrow 2 \rightarrow 3 \rightarrow 4 \rightarrow 5$) with banners emitted strictly on phase transitions.
 - **Two-Stage Consent Gate (`ask_question`)**: Strictly separates local commit authorization (Gate A) from remote push authorization (Gate B) via native interactive choice dialogs.
@@ -74,7 +74,7 @@ flowchart TD
 
 | Tier | Assigned Model / Target | Subagent / Mechanism | Target Task Scope | Token Economy |
 | :--- | :--- | :--- | :--- | :---: |
-| **Tier 1 (Low)** | **Local LM Studio Model** (e.g. Qwen 3.6 35B) / Gemini 3.8 Flash Low | `execute_local_task` / `task-runner-low` | Mechanical tasks, standalone functions, unit tests, syntax checks, **merciless local audit**. | **100% saved** (Local) / **~84%** (Cloud) |
+| **Tier 1 (Low - Dual Local)** | **Dual Local LM Studio**:<br>• **Maker**: Qwen3.8 27B Splash<br>• **Inquisitor**: Qwen3.6 35B A3B | `execute_local_task(role="maker"\|"inquisitor")` / `task-runner-low` | **Maker**: Fast code, tests, boilerplate.<br>**Inquisitor**: **Merciless local audit** (Phase 3), logic, unwraps. | **100% saved** (Local) / **~84%** (Cloud) |
 | **Tier 2 (Medium)** | Gemini 3.8 Flash (Medium) | `task-runner-medium` | Multi-file features, endpoint development, standard bug fixing, localized refactoring. | **~55% savings** |
 | **Tier 3 (High)** | Claude / Gemini 4 Argon / Gemini 3.8 Flash High | `consultant-high` / Primary | System architecture, distributed consensus, security audits, database migrations. | Baseline (Full reasoning) |
 
@@ -243,8 +243,9 @@ O **Antigravity Tiered Router (Projeto Antiback)** é uma arquitetura de roteame
 ### Destaques Técnicos:
 1. **Triagem em 1 Passada com 0 Tokens**: Utiliza o modelo neural Kev-0.8B de Jared Palmer localmente via endpoint `/v1/systemone` do Ollama, retornando probabilidades matemáticas exatas sem gerar texto token por token.
 2. **Motor Heurístico Determinístico**: Fallback instantâneo offline (0,2 ms) caso o daemon local esteja indisponível.
-3. **Protocolo Antiback Ativo**: Se um subagente encontra uma exceção ou incerteza durante a execução, ele aciona a ferramenta `evaluate_task_uncertainty` e é promovido automaticamente ao modelo sênior com todo o contexto preservado.
-4. **Economia Real Comprovada**: Até **84% de redução de tokens** em inspeções e **26,7% de economia líquida** no portfólio completo de desenvolvimento.
+3. **Mecanismo Dual Local (0 Tokens Cloud)**: Roteamento inteligente no LM Studio via `execute_local_task` com dois modelos locais simultâneos: **Maker (Qwen3.8 27B Splash)** para geração de código de alta vazão com MTP e **Inquisitor (Qwen3.6 35B A3B)** para auditoria de código implacável (Fase 3).
+4. **Protocolo Antiback Ativo**: Se um subagente encontra uma exceção ou incerteza durante a execução, ele aciona a ferramenta `evaluate_task_uncertainty` e é promovido automaticamente ao modelo sênior com todo o contexto preservado.
+5. **Economia Real Comprovada**: Até **84% de redução de tokens** em inspeções e **26,7% de economia líquida** no portfólio completo de desenvolvimento.
 
 ### 🧩 Suporte a Qualquer Família de Modelos (Arquitetura Modular)
 O Kev-0.8B classifica tarefas por **complexidade intrínseca** (leitura vs. implementação vs. arquitetura) e não pelo nome comercial da API. Isso significa que você pode trocar a família padrão por qualquer fornecedor:

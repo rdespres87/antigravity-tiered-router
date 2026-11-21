@@ -50,25 +50,25 @@ def check_lmstudio_available(host: str = LMSTUDIO_HOST) -> Tuple[bool, list]:
     return False, []
 
 
-def detect_active_model(host: str = LMSTUDIO_HOST) -> Tuple[Optional[str], Optional[str]]:
+def get_loaded_models(host: str = LMSTUDIO_HOST) -> Tuple[list, Optional[str]]:
     """
-    Detect the LLM currently loaded and active in LM Studio.
-    Checks `lms ps --json` first for the exact active model key.
-    Falls back to `/v1/models` HTTP API.
-    Returns: (active_model_id, warning_message_if_none)
+    Get all LLM models currently loaded in LM Studio.
+    Returns: (list_of_model_keys, warning_message_if_none)
     """
+    loaded = []
     try:
         res = subprocess.run(['lms', 'ps', '--json'], capture_output=True, text=True, timeout=2)
         if res.returncode == 0:
             data = json.loads(res.stdout)
             for item in data:
                 if item.get('type') == 'llm' and item.get('modelKey'):
-                    return item.get('modelKey'), None
-            return None, "Attention : LM Studio est actif mais aucun modèle LLM n'est chargé en mémoire. Veuillez charger un modèle dans LM Studio."
+                    loaded.append(item.get('modelKey'))
+            if loaded:
+                return loaded, None
     except Exception:
         pass
 
-    # Fallback to HTTP API
+    # Fallback to HTTP API /v1/models
     try:
         req = urllib.request.Request(f"{host}/v1/models")
         with urllib.request.urlopen(req, timeout=CONNECT_TIMEOUT_SEC) as resp:
@@ -76,12 +76,88 @@ def detect_active_model(host: str = LMSTUDIO_HOST) -> Tuple[Optional[str], Optio
                 data = json.loads(resp.read().decode("utf-8"))
                 models = [m.get("id") for m in data.get("data", []) if "embed" not in m.get("id", "").lower()]
                 if models:
-                    return models[0], None
-                return None, "Attention : LM Studio est actif mais aucun modèle LLM n'est disponible."
+                    return models, None
+                return [], "Attention : LM Studio est actif mais aucun modèle LLM n'est disponible."
     except Exception as e:
-        return None, f"Attention : LM Studio n'est pas joignable sur {host} ({e})."
+        return [], f"Attention : LM Studio n'est pas joignable sur {host} ({e})."
 
-    return None, "Attention : Impossible de détecter un modèle actif dans LM Studio."
+    return [], "Attention : Impossible de détecter un modèle actif dans LM Studio."
+
+
+def resolve_local_model(
+    requested_model: Optional[str] = None,
+    requested_role: Optional[str] = None,
+    prompt: str = "",
+    system_prompt: Optional[str] = None,
+    fast: bool = False,
+    host: str = LMSTUDIO_HOST
+) -> Tuple[Optional[str], str, Optional[str]]:
+    """
+    Resolves target model and assigned role among loaded models in LM Studio.
+    Returns: (resolved_model_key, assigned_role, error_warning)
+    Roles:
+      - 'maker' (Code generation, tests, fast implementation) -> Qwen3.8 Splash
+      - 'inquisitor' (Adversarial code audit, logic, edge cases) -> Qwen3.6 35B A3B
+    """
+    loaded, warning = get_loaded_models(host)
+    if not loaded:
+        return None, "none", warning
+
+    maker_cand = None
+    inquisitor_cand = None
+
+    for m in loaded:
+        m_lower = m.lower()
+        if "splash" in m_lower or "27b" in m_lower:
+            maker_cand = m
+        elif "35b" in m_lower or "a3b" in m_lower or "moe" in m_lower:
+            inquisitor_cand = m
+
+    if not maker_cand and loaded:
+        maker_cand = loaded[0]
+    if not inquisitor_cand and loaded:
+        inquisitor_cand = loaded[-1] if len(loaded) > 1 else loaded[0]
+
+    # 1. Explicit model requested
+    if requested_model:
+        req_low = requested_model.lower().strip()
+        for m in loaded:
+            if req_low == m.lower() or req_low in m.lower():
+                role = "maker" if m == maker_cand else ("inquisitor" if m == inquisitor_cand else "custom")
+                return m, role, None
+        if req_low in ("splash", "27b", "maker"):
+            return maker_cand, "maker", None
+        if req_low in ("35b", "a3b", "inquisitor", "inquisiteur", "audit"):
+            return inquisitor_cand, "inquisitor", None
+
+    # 2. Explicit role requested
+    if requested_role:
+        r_low = requested_role.lower().strip()
+        if r_low in ("maker", "code", "fast", "worker"):
+            return maker_cand, "maker", None
+        if r_low in ("inquisitor", "inquisiteur", "audit", "review", "adversarial"):
+            return inquisitor_cand, "inquisitor", None
+
+    # 3. Semantic / Contextual detection
+    combined_text = f"{prompt} {system_prompt or ''}".lower()
+    audit_indicators = [
+        "audit", "inquisit", "inquisiteur", "merciless", "adversarial",
+        "blocking defects", "code smell", "failles", "vulnérabilité",
+        "diff audit", "security audit", "review diff"
+    ]
+    if any(ind in combined_text for ind in audit_indicators):
+        return inquisitor_cand, "inquisitor", None
+
+    # Default to maker for fast or general implementation
+    return maker_cand, "maker", None
+
+
+def detect_active_model(host: str = LMSTUDIO_HOST) -> Tuple[Optional[str], Optional[str]]:
+    """Backward-compatible helper returning the primary active model."""
+    loaded, warning = get_loaded_models(host)
+    if loaded:
+        return loaded[0], None
+    return None, warning
 
 
 def execute_local_task(
@@ -91,20 +167,30 @@ def execute_local_task(
     max_tokens: int = 2048,
     temperature: float = 0.2,
     fast: bool = False,
+    model: Optional[str] = None,
+    role: Optional[str] = None,
     host: str = LMSTUDIO_HOST
 ) -> Dict[str, Any]:
     """
-    Executes a task locally on the active LM Studio model (0 cloud tokens).
-    Handles reasoning models (Qwen 3.6 / R1) and standard LLMs seamlessly.
-    fast: If True, instructs the model to produce raw code directly without verbose reasoning/explanations.
+    Executes a task locally on an LM Studio model (0 cloud tokens).
+    Automatically routes between Maker (Qwen3.8 Splash) and Inquisitor (Qwen3.6 35B A3B)
+    based on the requested role, explicit model selection, or semantic prompt analysis.
     """
-    active_model, warning = detect_active_model(host)
-    if not active_model:
+    target_model, assigned_role, warning = resolve_local_model(
+        requested_model=model,
+        requested_role=role,
+        prompt=prompt,
+        system_prompt=system_prompt,
+        fast=fast,
+        host=host
+    )
+
+    if not target_model:
         return {
             "success": False,
             "error": warning or "No LLM model is currently loaded in LM Studio.",
             "output": "",
-            "action": "Please load a model in LM Studio (e.g. Qwen 3.6) and retry, or fallback to cloud execution."
+            "action": "Please load a model in LM Studio (e.g. Qwen 3.8 Splash / Qwen 3.6 A3B) and retry, or fallback to cloud execution."
         }
 
     if fast:
@@ -132,7 +218,7 @@ def execute_local_task(
     ]
 
     payload = {
-        "model": active_model,
+        "model": target_model,
         "messages": messages,
         "temperature": temp,
         "max_tokens": limit_tokens,
@@ -160,12 +246,12 @@ def execute_local_task(
                 reasoning = msg.get("reasoning_content", "").strip()
                 usage = res.get("usage", {})
 
-                # If content is empty (e.g. reasoning model hit limit), fallback to reasoning output
                 final_output = content if content else reasoning
 
                 return {
                     "success": True,
-                    "model_used": active_model,
+                    "model_used": target_model,
+                    "role_assigned": assigned_role,
                     "elapsed_seconds": elapsed,
                     "output": final_output,
                     "has_reasoning": bool(reasoning),
@@ -289,12 +375,14 @@ def heuristic_classifier(prompt: str, context: Optional[Dict[str, Any]] = None) 
 
     # High complexity / architecture signals
     high_keywords = [
-        r"\barchitecture\b", r"\bredesign\b", r"\bsystem design\b",
-        r"\bsecurity audit\b", r"\bvulnerability\b", r"\bdeadlock\b",
-        r"\brace condition\b", r"\bdistributed\b", r"\bbenchmark.*architecture\b",
+        r"\barchitecture\b", r"\barquitetura\b", r"\bredesign\b", r"\bsystem design\b",
+        r"\bsecurity audit\b", r"\baudit.*seguran[çc]a\b", r"\bauditoria\b",
+        r"\bvulnerability\b", r"\bvulnerabilidade\b", r"\bdeadlock\b",
+        r"\brace conditions?\b", r"\bconcorr[êe]ncia\b",
+        r"\bdistributed\b", r"\bdistribu[ií]d[oa]s?\b", r"\bbenchmark.*architecture\b",
         r"\bstrategy\b", r"\bconsultant\b", r"\bcomplex debugging\b",
         r"\bbreaking change\b", r"\bbreaking changes\b", r"\bconsensus\b",
-        r"\bmigration\b", r"\brestructure\b", r"\brearchitect\b",
+        r"\bmigration\b", r"\bmigra[çc][ãa]o\b", r"\brestructure\b", r"\breestrutur", r"\brearchitect\b",
         r"\bsecurity overhaul\b", r"\bdeep diagnostic\b", r"\broot cause\b"
     ]
 
@@ -319,12 +407,13 @@ def heuristic_classifier(prompt: str, context: Optional[Dict[str, Any]] = None) 
 
     # Low complexity / quick inspection signals
     low_keywords = [
-        r"\blist\b", r"\bview\b", r"\bread\b", r"\blea\b",
+        r"\blist\b", r"\blistar\b", r"\bview\b", r"\bread\b", r"\blea\b",
         r"\bgrep\b", r"\bsearch\b", r"\bfind\b", r"\bwhere\b",
         r"\bwhat is\b", r"\bformat\b", r"\blint\b",
-        r"\bsyntax\b", r"\btypo\b", r"\bdocstring\b",
+        r"\bsyntax\b", r"\bsintaxe\b", r"\btypo\b", r"\bdocstring\b",
         r"\bquick test\b", r"\bstatus\b", r"\bshow\b",
-        r"\bprint\b", r"\bcheck\b", r"\bverify\b", r"\bconfirm\b",
+        r"\bprint\b", r"\bcheck\b", r"\bverify\b", r"\bverifique\b", r"\bconfirm\b",
+        r"\bveja\b", r"\barquivos?\b",
         r"\bexplain\b", r"\bdescribe\b", r"\bsummary\b",
         r"\breadme\b", r"\bdemo\b", r"\bsetup\b"
     ]
@@ -474,7 +563,7 @@ def format_consultation(task: str, current_findings: str, dilemma: str) -> Dict[
 TOOLS = [
     {
         "name": "execute_local_task",
-        "description": "Executes an easy/mechanical task, code generation, refactoring, or explanation directly on the active local model in LM Studio. Consumes zero cloud tokens.",
+        "description": "Executes a task locally on an LM Studio model at 0 cloud tokens. Supports dual-model routing: automatically directs code generation & fast tasks to Maker (Qwen3.8 Splash) and adversarial audits & logic checks to Inquisitor (Qwen3.6 35B A3B).",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -488,7 +577,7 @@ TOOLS = [
                 },
                 "context": {
                     "type": "string",
-                    "description": "Optional surrounding code, file snippets, or error messages."
+                    "description": "Optional surrounding code, file snippets, diffs, or error messages."
                 },
                 "max_tokens": {
                     "type": "integer",
@@ -504,6 +593,16 @@ TOOLS = [
                     "type": "boolean",
                     "default": False,
                     "description": "If true, optimizes for maximum speed (minimal reasoning tokens, direct code output)."
+                },
+                "role": {
+                    "type": "string",
+                    "enum": ["maker", "inquisitor", "auto"],
+                    "default": "auto",
+                    "description": "Specialized role: 'maker' (Qwen3.8 Splash - fast code & tests), 'inquisitor' (Qwen3.6 35B A3B - merciless audit & reasoning), or 'auto' (contextual triage)."
+                },
+                "model": {
+                    "type": "string",
+                    "description": "Optional exact model identifier or alias ('splash', '35b', 'a3b', 'qwen3.8-27b-splash', 'qwen/qwen3.6-35b-a3b'). Overrides automatic role routing."
                 }
             },
             "required": ["prompt"]
@@ -588,13 +687,17 @@ def handle_tool_call(name: str, args: Dict[str, Any]) -> Any:
         max_tokens = args.get("max_tokens", 2048)
         temperature = args.get("temperature", 0.2)
         fast = args.get("fast", False)
+        model = args.get("model")
+        role = args.get("role")
         return execute_local_task(
             prompt=prompt,
             system_prompt=sys_prompt,
             context=context,
             max_tokens=max_tokens,
             temperature=temperature,
-            fast=fast
+            fast=fast,
+            model=model,
+            role=role
         )
     elif name == "classify_and_route_task":
         prompt = args.get("prompt", "")
@@ -610,17 +713,24 @@ def handle_tool_call(name: str, args: Dict[str, Any]) -> Any:
         dilemma = args.get("dilemma", "")
         return format_consultation(task, findings, dilemma)
     elif name == "get_tier_status":
-        active_model, warning = detect_active_model()
+        loaded, warning = get_loaded_models()
+        maker_model, _, _ = resolve_local_model(requested_role="maker")
+        inquisitor_model, _, _ = resolve_local_model(requested_role="inquisitor")
         lm_running, available_models = check_lmstudio_available()
         return {
             "lmstudio_running": lm_running,
-            "active_model": active_model,
+            "dual_model_mode": len(loaded) >= 2,
+            "maker_model": maker_model,
+            "inquisitor_model": inquisitor_model,
+            "loaded_models": loaded,
+            "active_model": loaded[0] if loaded else None,
             "available_models": available_models,
             "warning": warning,
             "lmstudio_host": LMSTUDIO_HOST,
             "routing_engine": "local_heuristic (default 0.2ms)",
             "tier_hierarchy": {
-                "low": "Local LM Studio Model (execute_local_task) - 0 cloud tokens",
+                "low_maker": f"Qwen3.8 27B Splash ({maker_model}) - Code generation, tests, fast implementation (0 cloud tokens)",
+                "low_inquisitor": f"Qwen3.6 35B A3B ({inquisitor_model}) - Adversarial code audit, logic, edge cases (0 cloud tokens)",
                 "medium": "Task Runner Medium (Flash) - Main feature executor, tests, refactoring",
                 "high": "Consultant High (Pro / Argon) - Strategic architect, complex edge cases"
             }
@@ -661,7 +771,7 @@ def run_mcp_server():
                     "protocolVersion": "2024-11-05",
                     "capabilities": {"tools": {}},
                     "serverInfo": {
-                        "name": "antigravity-tiered-router-lmstudio",
+                        "name": "antigravity-tiered-router",
                         "version": "1.0.0"
                     }
                 }

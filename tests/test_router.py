@@ -19,11 +19,13 @@ current_dir = os.path.dirname(os.path.abspath(__file__))
 server_dir = os.path.join(current_dir, "..", "server")
 sys.path.insert(0, server_dir)
 
+from unittest.mock import MagicMock, patch
 from tiered_router_mcp import (
     heuristic_classifier,
     evaluate_uncertainty,
     format_consultation,
     handle_tool_call,
+    execute_local_task,
     TOOLS
 )
 
@@ -105,6 +107,42 @@ class TestTieredRouterLogic(unittest.TestCase):
         self.assertIn("CONSULTATION REQUEST: HIGH TIER ORACLE", res["formatted_prompt"])
         self.assertIn("Redis compartilhado", res["formatted_prompt"])
         self.assertEqual(res["target_agent"], "consultant-high")
+
+    def test_execute_local_task_default_max_tokens_4096(self):
+        tool_spec = next(t for t in TOOLS if t["name"] == "execute_local_task")
+        self.assertEqual(tool_spec["inputSchema"]["properties"]["max_tokens"]["default"], 4096)
+
+        captured = {}
+
+        def fake_urlopen(req, timeout=90.0):
+            captured["payload"] = json.loads(req.data.decode("utf-8"))
+            resp = MagicMock()
+            resp.status = 200
+            resp.__enter__ = MagicMock(return_value=resp)
+            resp.__exit__ = MagicMock(return_value=False)
+            resp.read.return_value = json.dumps({
+                "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}],
+                "usage": {"total_tokens": 10},
+            }).encode("utf-8")
+            return resp
+
+        with patch("tiered_router_mcp.resolve_local_model", return_value=("qwen3.8-27b-splash", "maker", None)), \
+             patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            res = execute_local_task(prompt="hello", role="maker")
+            self.assertTrue(res["success"])
+            self.assertEqual(captured["payload"]["max_tokens"], 4096)
+
+            res_fast = execute_local_task(prompt="hello", role="maker", fast=True)
+            self.assertTrue(res_fast["success"])
+            self.assertEqual(captured["payload"]["max_tokens"], 2048)
+
+            res_clamped = execute_local_task(prompt="hello", role="maker", max_tokens=0, fast=True)
+            self.assertTrue(res_clamped["success"])
+            self.assertEqual(captured["payload"]["max_tokens"], 1)
+
+            res_mcp = handle_tool_call("execute_local_task", {"prompt": "hello", "max_tokens": None})
+            self.assertTrue(res_mcp["success"])
+            self.assertEqual(captured["payload"]["max_tokens"], 4096)
 
 
 class TestMCPProtocolStdio(unittest.TestCase):

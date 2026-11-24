@@ -164,7 +164,7 @@ def execute_local_task(
     prompt: str,
     system_prompt: Optional[str] = None,
     context: Optional[str] = None,
-    max_tokens: int = 2048,
+    max_tokens: int = 4096,
     temperature: float = 0.2,
     fast: bool = False,
     model: Optional[str] = None,
@@ -193,20 +193,21 @@ def execute_local_task(
             "action": "Please load a model in LM Studio (e.g. Qwen 3.8 Splash / Qwen 3.6 A3B) and retry, or fallback to cloud execution."
         }
 
+    safe_max = max(1, max_tokens) if isinstance(max_tokens, int) else 4096
     if fast:
         sys_content = system_prompt or (
             "You are an ultra-fast code generator. Output ONLY the requested code block. "
             "Skip internal reasoning, skip explanations, output clean working code immediately."
         )
         temp = 0.1 if temperature == 0.2 else temperature
-        limit_tokens = min(max_tokens, 1024)
+        limit_tokens = min(safe_max, 2048)
     else:
         sys_content = system_prompt or (
             "You are an expert, concise software engineer. Provide direct, working code and clear explanations. "
             "Do not output unrequested chatter."
         )
         temp = temperature
-        limit_tokens = max_tokens
+        limit_tokens = safe_max
 
     full_prompt = prompt
     if context:
@@ -581,8 +582,8 @@ TOOLS = [
                 },
                 "max_tokens": {
                     "type": "integer",
-                    "default": 2048,
-                    "description": "Maximum tokens to generate (default: 2048)."
+                    "default": 4096,
+                    "description": "Maximum tokens to generate (default: 4096; accommodates reasoning models like Splash/35B)."
                 },
                 "temperature": {
                     "type": "number",
@@ -684,7 +685,8 @@ def handle_tool_call(name: str, args: Dict[str, Any]) -> Any:
         prompt = args.get("prompt", "")
         sys_prompt = args.get("system_prompt")
         context = args.get("context")
-        max_tokens = args.get("max_tokens", 2048)
+        raw_max = args.get("max_tokens")
+        max_tokens = raw_max if isinstance(raw_max, int) and raw_max > 0 else 4096
         temperature = args.get("temperature", 0.2)
         fast = args.get("fast", False)
         model = args.get("model")

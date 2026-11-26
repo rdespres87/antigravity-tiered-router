@@ -25,9 +25,9 @@ Whenever processing a user request or decomposing a project into subtasks:
    - **If classified as Medium (T2)**: Delegate to cloud executor (`task-runner-medium` or self/subagent).
    - **If classified as High (T3)**: Keep execution in the primary session or consult `consultant-high`.
 
-2. **Uncertainty Evaluation & Automatic Escalation**:
-   - If `execute_local_task` returns an error or warning (e.g. LM Studio not running or no model loaded), immediately fallback to cloud execution (`flash` / `pro`).
-   - If the local model output is incomplete, contains errors, or expresses doubt, inspect with `evaluate_task_uncertainty` and escalate to Medium.
+2. **Uncertainty Evaluation & Strict Fail-Closed Policy**:
+   - If `execute_local_task` returns an error, timeout, or `allow_cloud_fallback: false` (e.g. LM Studio offline, busy queue timeout, or no model loaded), **NEVER fallback silently to cloud** (`flash` / `pro` / primary). STOP and ask the user via `ask_question` whether to retry local execution or explicitly authorize cloud usage.
+   - If the local model output is incomplete, contains errors, or expresses doubt, inspect with `evaluate_task_uncertainty` and retry locally first; ask the user before escalating to cloud.
    - If Medium encounters an architectural roadblock, format consultation with `format_high_consultation` and consult High.
 
 3. **Context Preservation & Headroom Compression Protocol**:
@@ -42,7 +42,7 @@ Whenever processing a user request or decomposing a project into subtasks:
 Across **every project**, immediately after completing any code development, refactoring, or bug fix (and before any git commit or final validation):
 1. **Trigger Local Audit**: Collect the `git diff` and invoke the local model via `execute_local_task` (or skill `merciless-local-audit`). Prompt the local model to act as a merciless, ultra-strict auditor checking for language idiomaticity, boundary errors, silent failures, race conditions, and missing tests.
 2. **Auto-Healing**: If the audit returns `[BLOCKING]` defects, resolve them immediately using the local auto-healing loop.
-3. **Escalation**: Only proceed to commit validation or user feedback once the audit verdict is clean (`APPROVED`). If LM Studio is offline, warn the user and fallback to a cloud subagent.
+3. **Escalation**: Only proceed to commit validation or user feedback once the audit verdict is clean (`APPROVED`). If LM Studio is offline or unavailable, STOP and ask the user via `ask_question` before falling back to any cloud subagent.
 
 ### Standard On-Ramps
 Organize tasks along clear pathways rather than executing isolated ad-hoc commands:

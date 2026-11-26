@@ -14,20 +14,158 @@ Exposes tools:
   - get_tier_status: Reports health of LM Studio, available models, and routing statistics.
 """
 
+import contextlib
 import sys
 import json
+import math
 import re
 import os
+import socket
 import subprocess
 import time
 import urllib.request
 import urllib.error
-from typing import Dict, Any, Optional, Tuple
+from typing import Dict, Any, IO, Iterator, List, Optional, Tuple
+
+if sys.platform == "win32":
+    import msvcrt  # type: ignore[import]
+    fcntl = None  # type: ignore[assignment]
+else:
+    import fcntl  # type: ignore[import]
+    msvcrt = None  # type: ignore[assignment]
 
 # LM Studio runs on localhost:1234 by default (OpenAI-compatible API)
 LMSTUDIO_HOST = os.environ.get("LMSTUDIO_HOST", "http://127.0.0.1:1234")
 DECISION_MODEL = os.environ.get("LMSTUDIO_DECISION_MODEL", "qwen/qwen3.6-35b-a3b")
 CONNECT_TIMEOUT_SEC = 4.0
+LMSTUDIO_LOCK_PATH = os.environ.get(
+    "LMSTUDIO_LOCK_PATH",
+    os.path.expanduser("~/.gemini/tmp/lmstudio_queue.lock"),
+)
+FAIL_CLOSED_ACTION = (
+    "STOP: Do NOT fallback to cloud automatically. "
+    "Wait/retry local execution or ask the user via ask_question before using any cloud model."
+)
+
+
+def _env_float(name: str, default: float) -> float:
+    """Parse a positive finite float from environment variables with safe fallback."""
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        val = float(raw)
+        return val if math.isfinite(val) and val > 0 else default
+    except ValueError:
+        return default
+
+
+LOCAL_QUEUE_TIMEOUT_SEC = _env_float("LMSTUDIO_QUEUE_TIMEOUT_SEC", 900.0)
+LOCAL_IDLE_TIMEOUT_SEC = _env_float("LMSTUDIO_IDLE_TIMEOUT_SEC", 180.0)
+LOCAL_TOTAL_TIMEOUT_SEC = _env_float("LMSTUDIO_TIMEOUT_SEC", 600.0)
+
+
+class LocalQueueTimeoutError(TimeoutError):
+    """Raised when waiting for the cross-process LM Studio queue lock times out."""
+
+
+def _try_lock_exclusive(fd: IO[str]) -> bool:
+    """Attempt a non-blocking exclusive advisory lock on an open file descriptor."""
+    if sys.platform == "win32" and msvcrt is not None:
+        try:
+            fd.seek(0)
+            msvcrt.locking(fd.fileno(), msvcrt.LK_NBLCK, 1)
+            return True
+        except OSError:
+            return False
+    if fcntl is not None:
+        try:
+            fcntl.flock(fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return True
+        except (BlockingIOError, OSError):
+            return False
+    return True
+
+
+def _release_lock(fd: IO[str]) -> None:
+    """Release an advisory lock held on an open file descriptor."""
+    if sys.platform == "win32" and msvcrt is not None:
+        try:
+            fd.seek(0)
+            msvcrt.locking(fd.fileno(), msvcrt.LK_UNLCK, 1)
+        except OSError:
+            pass
+    elif fcntl is not None:
+        try:
+            fcntl.flock(fd.fileno(), fcntl.LOCK_UN)
+        except OSError:
+            pass
+
+
+@contextlib.contextmanager
+def _acquire_lmstudio_lock(
+    lock_path: Optional[str] = None,
+    queue_timeout: Optional[float] = None,
+    poll_interval: float = 0.25,
+) -> Iterator[float]:
+    """Serialize cross-process LM Studio calls via an exclusive file lock.
+
+    Yields queue_wait_seconds once acquired. Raises LocalQueueTimeoutError if
+    queue_timeout elapses before the lock becomes available.
+    """
+    effective_path = lock_path or LMSTUDIO_LOCK_PATH
+    effective_timeout = (
+        float(queue_timeout)
+        if isinstance(queue_timeout, (int, float))
+        and not isinstance(queue_timeout, bool)
+        and math.isfinite(float(queue_timeout))
+        and queue_timeout > 0
+        else LOCAL_QUEUE_TIMEOUT_SEC
+    )
+    os.makedirs(os.path.dirname(effective_path) or ".", exist_ok=True)
+    fd = open(effective_path, "a+", encoding="utf-8")
+    start = time.monotonic()
+    acquired = False
+    try:
+        while True:
+            if _try_lock_exclusive(fd):
+                acquired = True
+                break
+            elapsed = time.monotonic() - start
+            if elapsed >= effective_timeout:
+                raise LocalQueueTimeoutError(
+                    f"LM Studio queue wait timed out after {effective_timeout:.1f}s"
+                )
+            time.sleep(min(poll_interval, max(0.01, effective_timeout - elapsed)))
+        yield round(time.monotonic() - start, 2)
+    finally:
+        if acquired:
+            _release_lock(fd)
+        try:
+            fd.close()
+        except OSError:
+            pass
+
+
+def is_lmstudio_lock_busy(lock_path: Optional[str] = None) -> bool:
+    """Return True if another process currently holds the LM Studio queue lock."""
+    effective_path = lock_path or LMSTUDIO_LOCK_PATH
+    if not os.path.exists(effective_path):
+        return False
+    try:
+        fd = open(effective_path, "a+", encoding="utf-8")
+    except OSError:
+        return False
+    try:
+        if _try_lock_exclusive(fd):
+            _release_lock(fd)
+            return False
+        return True
+    finally:
+        try:
+            fd.close()
+        except OSError:
+            pass
 
 
 def log(msg: str) -> None:
@@ -160,6 +298,111 @@ def detect_active_model(host: str = LMSTUDIO_HOST) -> Tuple[Optional[str], Optio
     return None, warning
 
 
+def _is_timeout_error(exc: BaseException) -> bool:
+    """Return True if the exception represents a socket or streaming timeout."""
+    if isinstance(exc, (TimeoutError, socket.timeout)):
+        return True
+    if isinstance(exc, urllib.error.URLError):
+        if isinstance(exc.reason, (TimeoutError, socket.timeout)):
+            return True
+        if "timed out" in str(exc.reason).lower():
+            return True
+    return False
+
+
+def _find_fallback_model(failed_model: str, host: str = LMSTUDIO_HOST) -> Optional[str]:
+    """Pick an alternative loaded model, preferring MoE / 35B / A3B variants for speed."""
+    loaded, _ = get_loaded_models(host)
+    candidates = [m for m in loaded if m != failed_model]
+    if not candidates:
+        return None
+    preferred = [
+        m for m in candidates
+        if any(marker in m.lower() for marker in ("moe", "35b", "a3b"))
+    ]
+    return preferred[0] if preferred else candidates[0]
+
+
+def _stream_chat_completion(
+    host: str,
+    payload: Dict[str, Any],
+    idle_timeout: float,
+    total_timeout: float,
+) -> Tuple[str, str, int, str]:
+    """Stream an SSE chat completion from LM Studio and aggregate the final output."""
+    body = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        f"{host}/v1/chat/completions",
+        data=body,
+        headers={
+            "Content-Type": "application/json",
+            "Accept": "text/event-stream",
+            "User-Agent": "AntigravityLocalExecutor/1.0",
+        },
+        method="POST",
+    )
+
+    start = time.monotonic()
+    content_parts: List[str] = []
+    reasoning_parts: List[str] = []
+    finish_reason = "unknown"
+    total_tokens = 0
+
+    with urllib.request.urlopen(req, timeout=idle_timeout) as resp:
+        if resp.status != 200:
+            raise RuntimeError(f"LM Studio returned HTTP {resp.status}")
+
+        for raw_line in resp:
+            if time.monotonic() - start > total_timeout:
+                raise TimeoutError(
+                    f"Total streaming timeout exceeded ({total_timeout:.1f}s)"
+                )
+
+            line = raw_line.decode("utf-8", errors="replace").strip()
+            if not line or line.startswith(":") or not line.startswith("data:"):
+                continue
+
+            data_str = line[5:].strip()
+            if data_str == "[DONE]":
+                break
+
+            try:
+                chunk = json.loads(data_str)
+            except json.JSONDecodeError:
+                continue
+
+            if not isinstance(chunk, dict):
+                continue
+
+            usage = chunk.get("usage")
+            if isinstance(usage, dict) and isinstance(usage.get("total_tokens"), (int, float)) and not isinstance(usage.get("total_tokens"), bool):
+                total_tokens = int(usage["total_tokens"])
+
+            choices = chunk.get("choices")
+            if isinstance(choices, list) and choices and isinstance(choices[0], dict):
+                choice = choices[0]
+                delta = choice.get("delta")
+                if isinstance(delta, dict):
+                    content_piece = delta.get("content")
+                    if isinstance(content_piece, str) and content_piece:
+                        content_parts.append(content_piece)
+
+                    reasoning_piece = delta.get("reasoning_content")
+                    if isinstance(reasoning_piece, str) and reasoning_piece:
+                        reasoning_parts.append(reasoning_piece)
+
+                fr = choice.get("finish_reason")
+                if isinstance(fr, str) and fr:
+                    finish_reason = fr
+
+    return (
+        "".join(content_parts).strip(),
+        "".join(reasoning_parts).strip(),
+        total_tokens,
+        finish_reason,
+    )
+
+
 def execute_local_task(
     prompt: str,
     system_prompt: Optional[str] = None,
@@ -169,111 +412,163 @@ def execute_local_task(
     fast: bool = False,
     model: Optional[str] = None,
     role: Optional[str] = None,
-    host: str = LMSTUDIO_HOST
+    host: str = LMSTUDIO_HOST,
+    reasoning_effort: Optional[str] = None,
+    timeout: Optional[float] = None,
+    queue_timeout: Optional[float] = None,
 ) -> Dict[str, Any]:
     """
-    Executes a task locally on an LM Studio model (0 cloud tokens).
-    Automatically routes between Maker (Qwen3.8 Splash) and Inquisitor (Qwen3.6 35B A3B)
-    based on the requested role, explicit model selection, or semantic prompt analysis.
+    Executes a task locally on an LM Studio model (0 cloud tokens) using SSE streaming.
+    Serializes concurrent cross-process requests via a shared queue lock so parallel
+    projects wait their turn instead of timing out and falling back to cloud.
+    Strict fail-closed: never instructs automatic cloud fallback on error or timeout.
     """
-    target_model, assigned_role, warning = resolve_local_model(
-        requested_model=model,
-        requested_role=role,
-        prompt=prompt,
-        system_prompt=system_prompt,
-        fast=fast,
-        host=host
-    )
-
-    if not target_model:
-        return {
-            "success": False,
-            "error": warning or "No LLM model is currently loaded in LM Studio.",
-            "output": "",
-            "action": "Please load a model in LM Studio (e.g. Qwen 3.8 Splash / Qwen 3.6 A3B) and retry, or fallback to cloud execution."
-        }
-
-    safe_max = max(1, max_tokens) if isinstance(max_tokens, int) else 4096
-    if fast:
-        sys_content = system_prompt or (
-            "You are an ultra-fast code generator. Output ONLY the requested code block. "
-            "Skip internal reasoning, skip explanations, output clean working code immediately."
-        )
-        temp = 0.1 if temperature == 0.2 else temperature
-        limit_tokens = min(safe_max, 2048)
-    else:
-        sys_content = system_prompt or (
-            "You are an expert, concise software engineer. Provide direct, working code and clear explanations. "
-            "Do not output unrequested chatter."
-        )
-        temp = temperature
-        limit_tokens = safe_max
-
-    full_prompt = prompt
-    if context:
-        full_prompt = f"### CONTEXT:\n{context}\n\n### TASK:\n{prompt}"
-
-    messages = [
-        {"role": "system", "content": sys_content},
-        {"role": "user", "content": full_prompt}
-    ]
-
-    payload = {
-        "model": target_model,
-        "messages": messages,
-        "temperature": temp,
-        "max_tokens": limit_tokens,
-        "stream": False
-    }
-
-    t0 = time.time()
+    queue_wait_sec = 0.0
+    t0 = time.monotonic()
     try:
-        body = json.dumps(payload).encode("utf-8")
-        req = urllib.request.Request(
-            f"{host}/v1/chat/completions",
-            data=body,
-            headers={
-                "Content-Type": "application/json",
-                "User-Agent": "AntigravityLocalExecutor/1.0"
-            }
-        )
-        with urllib.request.urlopen(req, timeout=90.0) as resp:
-            if resp.status == 200:
-                res = json.loads(resp.read().decode("utf-8"))
-                elapsed = round(time.time() - t0, 2)
-                choice = res.get("choices", [{}])[0]
-                msg = choice.get("message", {})
-                content = msg.get("content", "").strip()
-                reasoning = msg.get("reasoning_content", "").strip()
-                usage = res.get("usage", {})
+        with _acquire_lmstudio_lock(queue_timeout=queue_timeout) as waited:
+            queue_wait_sec = waited
+            target_model, assigned_role, warning = resolve_local_model(
+                requested_model=model,
+                requested_role=role,
+                prompt=prompt,
+                system_prompt=system_prompt,
+                fast=fast,
+                host=host
+            )
 
-                final_output = content if content else reasoning
-
-                return {
-                    "success": True,
-                    "model_used": target_model,
-                    "role_assigned": assigned_role,
-                    "elapsed_seconds": elapsed,
-                    "output": final_output,
-                    "has_reasoning": bool(reasoning),
-                    "tokens_used": usage.get("total_tokens", 0),
-                    "finish_reason": choice.get("finish_reason", "unknown")
-                }
-            else:
+            if not target_model:
                 return {
                     "success": False,
-                    "error": f"LM Studio returned HTTP {resp.status}",
-                    "output": ""
+                    "allow_cloud_fallback": False,
+                    "error_code": "NO_LOCAL_MODEL",
+                    "error": warning or "No LLM model is currently loaded in LM Studio.",
+                    "queue_wait_seconds": queue_wait_sec,
+                    "output": "",
+                    "action": FAIL_CLOSED_ACTION,
                 }
+
+            safe_max = max(1, max_tokens) if isinstance(max_tokens, int) else 4096
+            if fast:
+                sys_content = system_prompt or (
+                    "You are an ultra-fast code generator. Output ONLY the requested code block. "
+                    "Skip internal reasoning, skip explanations, output clean working code immediately."
+                )
+                temp = 0.1 if temperature == 0.2 else temperature
+                limit_tokens = min(safe_max, 2048)
+            else:
+                sys_content = system_prompt or (
+                    "You are an expert, concise software engineer. Provide direct, working code and clear explanations. "
+                    "Do not output unrequested chatter."
+                )
+                temp = temperature
+                limit_tokens = safe_max
+
+            full_prompt = prompt
+            if context:
+                full_prompt = f"### CONTEXT:\n{context}\n\n### TASK:\n{prompt}"
+
+            messages = [
+                {"role": "system", "content": sys_content},
+                {"role": "user", "content": full_prompt}
+            ]
+
+            payload: Dict[str, Any] = {
+                "model": target_model,
+                "messages": messages,
+                "temperature": temp,
+                "max_tokens": limit_tokens,
+                "stream": True,
+                "stream_options": {"include_usage": True},
+            }
+
+            if isinstance(reasoning_effort, str) and reasoning_effort.strip():
+                payload["reasoning_effort"] = reasoning_effort.strip()
+            elif fast:
+                payload["reasoning_effort"] = "none"
+
+            effective_total = (
+                float(timeout)
+                if isinstance(timeout, (int, float))
+                and not isinstance(timeout, bool)
+                and math.isfinite(float(timeout))
+                and timeout > 0
+                else LOCAL_TOTAL_TIMEOUT_SEC
+            )
+            effective_idle = min(LOCAL_IDLE_TIMEOUT_SEC, effective_total)
+
+            t_infer = time.monotonic()
+            active_model = target_model
+            fallback_from: Optional[str] = None
+
+            try:
+                content, reasoning, total_tokens, finish_reason = _stream_chat_completion(
+                    host=host,
+                    payload=payload,
+                    idle_timeout=effective_idle,
+                    total_timeout=effective_total,
+                )
+            except (TimeoutError, socket.timeout, urllib.error.URLError) as exc:
+                if _is_timeout_error(exc) and model is None and assigned_role == "maker":
+                    fallback_model = _find_fallback_model(target_model, host=host)
+                    if fallback_model is not None:
+                        log(f"Maker ({target_model}) timed out ({exc}); retrying on {fallback_model}...")
+                        payload["model"] = fallback_model
+                        active_model = fallback_model
+                        fallback_from = target_model
+                        content, reasoning, total_tokens, finish_reason = _stream_chat_completion(
+                            host=host,
+                            payload=payload,
+                            idle_timeout=effective_idle,
+                            total_timeout=effective_total,
+                        )
+                    else:
+                        raise
+                else:
+                    raise
+
+            elapsed = round(time.monotonic() - t_infer, 2)
+            final_output = content if content else reasoning
+            result: Dict[str, Any] = {
+                "success": True,
+                "model_used": active_model,
+                "role_assigned": assigned_role,
+                "elapsed_seconds": elapsed,
+                "queue_wait_seconds": queue_wait_sec,
+                "output": final_output,
+                "has_reasoning": bool(reasoning),
+                "tokens_used": total_tokens,
+                "finish_reason": finish_reason,
+            }
+            if fallback_from is not None:
+                result["fallback_from"] = fallback_from
+            return result
+    except LocalQueueTimeoutError as e:
+        elapsed = round(time.monotonic() - t0, 2)
+        log(f"execute_local_task queue timed out after {elapsed}s: {e}")
+        return {
+            "success": False,
+            "allow_cloud_fallback": False,
+            "error_code": "QUEUE_TIMEOUT",
+            "error": str(e),
+            "elapsed_seconds": elapsed,
+            "queue_wait_seconds": elapsed,
+            "output": "",
+            "action": FAIL_CLOSED_ACTION,
+        }
     except Exception as e:
-        elapsed = round(time.time() - t0, 2)
+        elapsed = round(time.monotonic() - t0, 2)
+        error_code = "LOCAL_TIMEOUT" if _is_timeout_error(e) else "LOCAL_ERROR"
         log(f"execute_local_task failed after {elapsed}s: {e}")
         return {
             "success": False,
+            "allow_cloud_fallback": False,
+            "error_code": error_code,
             "error": f"Local model execution failed: {e}",
             "elapsed_seconds": elapsed,
+            "queue_wait_seconds": queue_wait_sec,
             "output": "",
-            "action": "Escalate to cloud model (flash or pro)."
+            "action": FAIL_CLOSED_ACTION,
         }
 
 
@@ -604,6 +899,19 @@ TOOLS = [
                 "model": {
                     "type": "string",
                     "description": "Optional exact model identifier or alias ('splash', '35b', 'a3b', 'qwen3.8-27b-splash', 'qwen/qwen3.6-35b-a3b'). Overrides automatic role routing."
+                },
+                "reasoning_effort": {
+                    "type": "string",
+                    "enum": ["none", "low", "medium", "high"],
+                    "description": "Optional reasoning effort override ('none' disables thinking tokens for maximum speed; fast=true defaults to 'none')."
+                },
+                "timeout": {
+                    "type": "number",
+                    "description": "Optional total streaming timeout in seconds after acquiring the local lock (defaults to LMSTUDIO_TIMEOUT_SEC env var or 600s)."
+                },
+                "queue_timeout": {
+                    "type": "number",
+                    "description": "Optional max seconds to wait in the cross-process LM Studio queue when another project is using the local model (defaults to LMSTUDIO_QUEUE_TIMEOUT_SEC or 900s)."
                 }
             },
             "required": ["prompt"]
@@ -691,6 +999,9 @@ def handle_tool_call(name: str, args: Dict[str, Any]) -> Any:
         fast = args.get("fast", False)
         model = args.get("model")
         role = args.get("role")
+        reasoning_effort = args.get("reasoning_effort")
+        timeout = args.get("timeout")
+        queue_timeout = args.get("queue_timeout")
         return execute_local_task(
             prompt=prompt,
             system_prompt=sys_prompt,
@@ -699,7 +1010,10 @@ def handle_tool_call(name: str, args: Dict[str, Any]) -> Any:
             temperature=temperature,
             fast=fast,
             model=model,
-            role=role
+            role=role,
+            reasoning_effort=reasoning_effort,
+            timeout=timeout,
+            queue_timeout=queue_timeout,
         )
     elif name == "classify_and_route_task":
         prompt = args.get("prompt", "")
@@ -729,6 +1043,12 @@ def handle_tool_call(name: str, args: Dict[str, Any]) -> Any:
             "available_models": available_models,
             "warning": warning,
             "lmstudio_host": LMSTUDIO_HOST,
+            "lmstudio_busy": is_lmstudio_lock_busy(),
+            "lock_path": LMSTUDIO_LOCK_PATH,
+            "allow_silent_cloud_fallback": False,
+            "queue_timeout_sec": LOCAL_QUEUE_TIMEOUT_SEC,
+            "idle_timeout_sec": LOCAL_IDLE_TIMEOUT_SEC,
+            "total_timeout_sec": LOCAL_TOTAL_TIMEOUT_SEC,
             "routing_engine": "local_heuristic (default 0.2ms)",
             "tier_hierarchy": {
                 "low_maker": f"Qwen3.8 27B Splash ({maker_model}) - Code generation, tests, fast implementation (0 cloud tokens)",

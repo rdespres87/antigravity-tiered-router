@@ -1,132 +1,31 @@
-# Tiered Model Escalation & Fallback Rule
+# Tiered Model Router & Local-First Execution (always-on)
 
-This rule governs how tasks and subagent operations are delegated across model tiers in Antigravity to maximize speed, save 100% cloud tokens on easy tasks, and ensure rock-solid reliability.
+Governs 3-tier delegation, local LM Studio offloading (0 cloud tokens), and Headroom context compression.
 
-## 1. The 3-Tier Hierarchy & The Ceiling Principle
+## 1. 3-Tier Hierarchy & Ceiling Principle
+- **Ceiling Principle**: Subagents can only be `flash_lite`, `flash`, `pro`, or `inherit` (never Claude/GPT). If Flash is selected in the IDE, the agent cannot escalate up to Claude/GPT; routing is always downward.
 
-> [!IMPORTANT]
-> **Ceiling Principle in Antigravity IDE**: Subagents can only be `flash_lite`, `flash`, `pro` (Gemini), or `inherit`. **Claude/GPT cannot be spawned as subagents**. If Gemini Flash is selected in the UI dropdown, the IDE *cannot* automatically delegate up to Claude/GPT. To utilize Claude/GPT for High (Tier 3) tasks, Claude/GPT **must be selected as the main model** in the IDE selector; it will then delegate downward automatically.
+| Tier | Target | Mechanism | Best Used For |
+|---|---|---|---|
+| **Tier 1 (Dual Local)** | LM Studio: **Maker** (Qwen3.8 27B Splash) + **Inquisitor** (Qwen3.6 35B A3B) | `call_mcp_tool(ServerName="tiered-router", ToolName="execute_local_task", Arguments={"role": "maker"|"inquisitor", "prompt": ...})` | **Maker**: code, tests, fixtures, boilerplate, docstrings, commit messages (0 cloud tokens). **Inquisitor**: Phase 3 merciless diff audit (0 cloud tokens). |
+| **Tier 2 (Medium)** | Gemini Flash / `pro` subagent | `invoke_subagent` | Multi-file features, complex refactors, test-driven debugging. |
+| **Tier 3 (High)** | Primary session / `consultant-high` | Primary session | Architecture, subtle concurrency/security, high blast radius. |
 
-| Tier | Execution Target | Mechanism | Role & Best Used For | Token Economy |
-| :--- | :--- | :--- | :--- | :---: |
-| **Tier 1 (Low - Dual Local)** | **Dual Local LM Studio**: <br>• **Maker**: Qwen3.8 27B Splash<br>• **Inquisitor**: Qwen3.6 35B A3B | MCP Tool: `execute_local_task(role="maker"|"inquisitor")` | • **Maker**: Fast code, tests, boilerplate, docstrings.<br>• **Inquisitor**: Merciless audit (Phase 3), logic, race conditions. | **100% cloud tokens saved** (0 cost) |
-| **Tier 2 (Medium)** | Gemini 3.8 Flash / Cloud Subagent | `task-runner-medium` or `pro` subagent | Multi-file features, complex refactoring, test-driven debugging, standard implementation. | ~50-65% savings |
-| **Tier 3 (High)** | Claude / Gemini 4 Argon / Primary Session | Primary Session / `consultant-high` | System architecture, distributed consensus, security audits, database migrations, subtle race conditions. | Baseline |
+## 2. Permanent Local-First & Critical RED Protocol
+- **Permanent Local-First (GREEN / YELLOW / RED)**: Whenever LM Studio is active (`local=...`), default to `execute_local_task(role="maker")` for modular functions, algorithms, unit tests, fixtures, boilerplate, docstrings, and commit messages, and `execute_local_task(role="inquisitor")` for Phase 3 audits.
+- **Critical Quota RED (<15% 7d remaining or RED)**:
+  - Cloud model acts as **pure orchestrator**: strictly FORBIDDEN from generating domain code, algorithms, or test implementations directly in chat or cloud subagents.
+  - **100% Local Offloading**: code generation, refactoring, bug fixes, unit tests, compiler/test error diagnosis (`context=error`), docs, and conventional commit drafting from `git diff` MUST run via `execute_local_task`.
+  - Cloud only frames requirements, calls `execute_local_task`, applies edits (`write_file`/`edit_file`), runs native verification, and outputs telegraphic summaries (<100 words).
 
-### Permanent Local-First Worker Policy (All Quota Levels)
-Whenever LM Studio is active (`local=...`), the agent adopts a **Local-First Worker policy across ALL budget tiers**:
-- **Default Worker for Implementation (Maker - Qwen3.8 Splash)**: `execute_local_task(role="maker")` is the primary author for all modular functions, algorithms, unit tests, synthetic fixtures, boilerplate, data conversions, docstrings, and conventional commit messages at 0 cloud tokens.
-- **Independent Adversarial Auditor (Inquisitor - Qwen3.6 35B A3B)**: `execute_local_task(role="inquisitor")` executes the mandatory Phase 3 merciless code audit on the diff at 0 cloud tokens, providing cross-model scrutiny without self-bias.
-- **Permanent Cloud Token Shield**: By offloading code drafting and adversarial audit permanently to local compute, cloud token consumption is reduced by 70%–90% across every phase, reserving cloud quotas strictly for system architecture (T3), framing, and tool orchestration.
+## 3. Local Auto-Healing, Fallback & Headroom Compression
+- **Auto-Healing Loop**: Include target language idiomaticity constraints in `execute_local_task` prompts. Validate immediately with native toolchains (`cargo check`, `cargo test`, `tsc --noEmit`, `pytest`). On failure, pass diagnostics back to `execute_local_task(context=error)`. Escalate to cloud only after 2 local failures.
+- **Uncertainty & Offline Fallback**: If LM Studio is offline/errors, fallback immediately to cloud (`flash`/`pro`) and note it. On incomplete/uncertain local output, inspect with `evaluate_task_uncertainty` and escalate; on architectural roadblocks, use `format_high_consultation`. Always pass accumulated findings when escalating.
+- **Mandatory Headroom Compression (>80 lines / >800 tokens)**: For large file reads, `git diff`, or compiler/test logs >80 lines, invoke `call_mcp_tool(ServerName="headroom", ToolName="headroom_compress", Arguments={"content": ...})`. Reason on the compressed output and fetch exact slices via `headroom_retrieve(hash=...)` only when needed. For CLI/`agy` subagents, set `GOOGLE_GEMINI_BASE_URL=http://127.0.0.1:8787/p/<project>`.
 
----
-
-## 2. Delegation & Routing Protocol
-
-### Critical Quota Protocol (< 15% 7d remaining or Generalized RED)
-When cloud 7-day quota has < 15% remaining (or when all active cloud models are in RED status):
-1. **Cloud Model as Pure Orchestrator**: The cloud session is strictly prohibited from generating domain code, implementation algorithms, or long code blocks.
-2. **100% Code & Text Generation Offloaded to LM Studio**:
-   - All new code, refactorings, bug fixes, and unit tests MUST be generated via `call_mcp_tool(ServerName="tiered-router", ToolName="execute_local_task", Arguments={"prompt": ...})` at 0 cloud cost.
-   - **Commit Messages & Git Drafting**: Before any commit gate, pass the `git diff` to `execute_local_task` to generate the conventional commit title and description locally.
-   - **Documentation & Summaries**: Release notes, docstrings, markdown explanations, and architectural summaries must be drafted by LM Studio.
-   - **Diagnostic & Error Triage**: Feed compiler/linter/test errors to `execute_local_task(context=error)` for root-cause diagnosis and correction before applying changes.
-3. **Supervisor Workflow**: The cloud model only analyzes requirements, calls `execute_local_task`, persists code using `write_file`/`edit_file`, runs verification commands, and outputs telegraphic responses (< 100 words).
-
-Whenever processing a user request or decomposing a project into subtasks:
-
-1. **Instant Triage (0.2 ms)**:
-   - Use the `classify_and_route_task` tool (or instant regex heuristic) to determine the recommended tier.
-   - **If classified as Low (T0/T1)**: Call the MCP tool `call_mcp_tool(ServerName="tiered-router", ToolName="execute_local_task", Arguments={"prompt": ...})`.
-     - The active local model in LM Studio executes the task offline at zero token cost.
-     - **Auto-Healing Loop (0 cloud tokens)**: Code generated locally must be strictly idiomatic to the target language (zero lazy `.clone()`, no unwrap in production paths, idiomatic iterators). Immediately validate generated code using native linters/compilers (`rtk cargo check`, `rtk cargo test`, `tsc --noEmit`). If errors arise, pass the compiler diagnostic back to `execute_local_task(context=error)` to fix locally. Escalate only after 2 local failures.
-     - Verify or integrate the returned code/text.
-   - **If classified as Medium (T2)**: Delegate to cloud executor (`task-runner-medium` or self/subagent).
-   - **If classified as High (T3)**: Keep execution in the primary session or consult `consultant-high`.
-
-2. **Uncertainty Evaluation & Automatic Escalation**:
-   - If `execute_local_task` returns an error or warning (e.g. LM Studio not running or no model loaded), immediately fallback to cloud execution (`flash` / `pro`).
-   - If the local model output is incomplete, contains errors, or expresses doubt, inspect with `evaluate_task_uncertainty` and escalate to Medium.
-   - If Medium encounters an architectural roadblock, format consultation with `format_high_consultation` and consult High.
-
-3. **Context Preservation & Headroom Compression Protocol**:
-   - During escalation, never restart from scratch. Pass accumulated code findings, investigated files, and error traces to the higher tier.
-   - **Mandatory Headroom Compression (>80 lines)**: For any payload (file reads, compiler logs, `git diff`) exceeding 80 lines or 800 tokens, you MUST invoke `call_mcp_tool(ServerName="headroom", ToolName="headroom_compress", Arguments={"content": ...})`. Reason on the compressed output and retain the hash for retrieval (`headroom_retrieve`).
-
----
-
-## 3. Standard Execution Flows & Mandatory Local Audit
-
-### Mandatory Post-Dev / Post-Fix Merciless Local Audit (0 Cloud Tokens)
-Across **every project**, immediately after completing any code development, refactoring, or bug fix (and before any git commit or final validation):
-1. **Trigger Local Audit**: Collect the `git diff` and invoke the local model via `execute_local_task` (or skill `merciless-local-audit`). Prompt the local model to act as a merciless, ultra-strict auditor checking for language idiomaticity, boundary errors, silent failures, race conditions, and missing tests.
-2. **Auto-Healing**: If the audit returns `[BLOCKING]` defects, resolve them immediately using the local auto-healing loop.
-3. **Escalation**: Only proceed to commit validation or user feedback once the audit verdict is clean (`APPROVED`). If LM Studio is offline, warn the user and fallback to a cloud subagent.
-
-### Standard On-Ramps
-Organize tasks along clear pathways rather than executing isolated ad-hoc commands:
-
-- **On-Ramp New Project Scaffolding (Mandatory First Step)**:
-  1. *Detection*: When bootstrapping a new repository or entering one lacking root `AGENTS.md` or `docs/agent/`.
-  2. *Scaffold*: Trigger skill `project-scaffold` to establish root `AGENTS.md` (declaring global rules apply) and `docs/agent/{SESSION_STATE,TASKS,HANDOFF}.md`.
-  3. *Zero Domain Code*: Never write business logic or features until the persistent scaffolding is committed.
-  4. *Initial Commit Gate*: Confirm initial scaffold commit via Gate A `ask_question`.
-
-- **Main Flow (Feature: Concept to Production)**:
-  1. *Framing & Spec*: Draft architecture artifact / spec (`RequestFeedback: true`).
-  2. *Implementation*: Offload standalone modules/tests to Tier 1 local model or Tier 2 subagent.
-  3. *Merciless Local Audit*: Mandatory zero-token audit of `git diff` via `execute_local_task`.
-  4. *Adversarial Verification*: Trigger `grill-orchestrator` (Cross-family Maker vs Inquisitor, black-box red-team test generation) for critical components.
-  5. *Validation & Mutation Testing*: Native test suite (`rtk cargo test`, `tsc`) + mutation testing oracle (`cargo mutants --in-diff` for Rust).
-  6. *Phase Boundary*: Choose `/compact` or `HANDOFF` before starting next phase.
-
-- **On-Ramp Bug / Regression**:
-  1. Reproduce with minimal isolated test case (Tier 1 local model at 0 tokens).
-  2. Implement fix with local auto-healing loop.
-  3. *Merciless Local Audit*: Mandatory local audit of fix diff via `execute_local_task`.
-  4. Validate test pass and run clippy/linter.
-
-- **On-Ramp Architecture & Codebase Health**:
-  1. Retrieve architectural memory via Headroom (`headroom_retrieve`).
-  2. Identify coupling / refactoring seams.
-  3. Enter Main Flow via `grill-orchestrator` if high blast radius.
-
----
-
-## 4. The "Recommend and Stop" Principle
-
-When advising the user on an architectural dilemma, debugging approach, or workflow selection:
-- Clearly state the recommended flow, why competing alternatives were ruled out, and the next command/step.
-- **Stop and await confirmation** before creating or modifying code files, running heavy builds, or firing autonomous multi-agent loops prematurely.
-
----
-
-## 5. Git Commit Hygiene & Quality Gates (Universal Standard)
-
-- **Atomic Commits**: Sliced into small, single-purpose changes. Never mix a bug fix with a new feature or unaligned changes.
-- **Bisectability**: Every commit must independently compile and pass CI/tests.
-- **CI Validation**: Run tests and linter before staging/committing.
-- **README & Doc Sync**: Update README and documentation alongside any code/feature changes.
-- **Zero Autonomous Commits or Pushes & Strict Separation**:
-  - Never bundle commit and push in a single request. They are two independent gates.
-  - **Gate A (Local Commit)**: Display unified diff, propose message, and invoke `ask_question`:
-    - Question: `"Souhaitez-vous enregistrer ce commit atomique localement ?"`
-    - Options: `["(Recommended) Oui, enregistrer le commit local (sans push)", "Ajuster le message ou le périmètre du commit", "Annuler / apporter d'autres modifications"]`
-  - **Gate B (Remote Push - Dedicated Turn)**: Keep commits local by default to preserve CI runner quotas. In a separate turn, ask via `ask_question`:
-    - Question: `"Le commit local est enregistré. Souhaitez-vous pousser les modifications vers origin/main ?"`
-    - Options: `["(Recommended) Non, conserver en local (préserve les quotas des runners CI)", "Oui, pousser vers origin/main"]`
-
----
-
-## 6. Mandatory Phase Tracking & Detailed Testing Protocol
-
-Every development or bug fixing interaction MUST explicitly display progress through clear banners:
-- **Phase Transition Banners Only (Never Repeat within the Same Phase)**:
-  - The Markdown banner `### [PHASE X/5 : ...]` MUST be emitted once at each phase transition (upon entering Phase 1, Phase 2, Phase 3, Phase 4, or Phase 5, or upon returning to Phase 1 for fixes).
-  - Do NOT repeat the `### [PHASE X/5]` banner across multiple intermediate tool calls within the same phase. Once the active phase is declared, proceed with tools and concise updates.
-- The 5 phases:
-  1. `### [PHASE 1/5 : CONCEPTION & DÉVELOPPEMENT]` : Architecture & implementation.
-  2. `### [PHASE 2/5 : VALIDATION NATIVE & TESTS CI]` : Full toolchain execution (`cargo test && cargo clippy`, `tsc`, `pytest`).
-  3. `### [PHASE 3/5 : AUDIT LOCAL IMPITOYABLE (0 TOKENS)]` : LM Studio adversarial review via `execute_local_task`.
-  4. `### [PHASE 4/5 : AUTO-HEALING & CORRECTIFS]` : Mandatory step. If `REJECTED`: resolve `[BLOCKING]` defects and re-audit. If `APPROVED`: confirm `No blocking defects detected (Local audit APPROVED on first pass, 0 fixes required)`.
-  5. `### [PHASE 5/5 : RAPPORT DÉTAILLÉ & PROTOCOLE DE TEST]` : Comprehensive report including exact automated test commands and step-by-step manual validation scenarios before Gate 3.
+## 4. Standard On-Ramps & "Recommend and Stop"
+- **New Project**: trigger `project-scaffold` skill before writing any domain code.
+- **Feature Flow**: spec (`RequestFeedback: true`) -> local/T2 implementation -> Phase 3 local audit -> `grill-orchestrator` (critical components) -> native tests + `cargo mutants --in-diff` (Rust) -> Phase Boundary.
+- **Bug / Regression**: minimal failing test (Tier 1) -> local fix + auto-healing -> Phase 3 local audit -> full validation.
+- **Architecture Health**: `headroom_retrieve` -> identify seams -> `grill-orchestrator` if high blast radius.
+- **Recommend and Stop**: On architectural dilemmas or heavy workflow choices, state the recommended path and why alternatives were ruled out, then wait for user confirmation before editing files or launching heavy loops.

@@ -1,0 +1,25 @@
+# Antigravity / Gemini context exclusions
+.git/
+.headroom/
+.DS_Store
+Thumbs.db
+*.log
+.env
+.env.*
+*.sqlite
+*.sqlite3
+*.db
+*.zip
+*.tar.gz
+
+# Python virtualenvs, caches & lockfiles
+.venv/
+venv/
+env/
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+poetry.lock
+uv.lock

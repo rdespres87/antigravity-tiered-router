@@ -1,41 +1,31 @@
 ---
 name: tiered-router
-description: Global tiered model router and uncertainty fallback workflow. Guides the agent to triage tasks across Gemini 3.8 Flash (Low, Medium, High) / Gemini 4 Argon, and use classify_and_route_task and evaluate_task_uncertainty tools for token optimization.
+description: Global Local-First tiered router and Strict Fail-Closed workflow. Guides task routing across Dual Local LM Studio (Maker Splash 27B / Inquisitor 35B) and cloud tiers, with <=150 LOC maker chunking and zero silent cloud fallback.
 ---
 
-# Tiered Router & Model Escalation Guide
+# Tiered Router — Operational Guide
 
-This skill provides operational procedures for using the **Antigravity Tiered Router** to save tokens, accelerate response times, and handle uncertainty safely.
+Single source of truth for routing lives in `rules/AGENTS.md` (Permanent Local-First across `GREEN`/`YELLOW`/`RED`, Strict Fail-Closed). This skill summarizes the operational MCP workflow.
 
-## Core Rules
+## 1. Core MCP Tools
 
-1. **Triage First**:
-   - Before executing tasks, call `classify_and_route_task` to determine the target tier:
-     - `Low`: Inspections, file reads, greps, typos, syntax checks (saves ~84% tokens).
-     - `Medium`: Routine implementation, writing tests, bug fixes, refactoring (saves ~55% tokens).
-     - `High`: Architecture redesign, distributed consensus, security audits, deadlocks (full reasoning capacity with Gemini 3.8 Flash High / Gemini 4 Argon).
-2. **Evaluate Non-Capacity (Uncertainty Fallback)**:
-   - After a lower-tier subagent finishes its turn, run `evaluate_task_uncertainty`.
-   - If hesitation, errors (`TypeError`, `SyntaxError`, `failed with code 1`), or unresolved doubts are detected:
-     - Immediately cascade from `Low -> Medium` or `Medium -> High`.
-     - Pass accumulated context and error logs to avoid restarting from scratch.
-3. **High Consultation**:
-   - When facing architectural trade-offs, call `format_high_consultation` to formulate a concise query for the High tier consultant.
+1. **Triage (`classify_and_route_task`)**: Optional heuristic check when task complexity (T0–T3) is ambiguous.
+2. **Local Execution (`execute_local_task`)** — **0 cloud tokens**, serialized via FIFO queue (`~/.gemini/tmp/lmstudio_queue.lock`):
+   - `role="maker"` (**Qwen3.8 27B Splash**): modular functions, algorithms, unit tests, fixtures, boilerplate, docstrings, commit messages.
+   - **Chunking rule**: target at most **1 file or 1 focused function/slice (`<=150 LOC`)** per call to prevent `finish_reason: "length"` truncations.
+   - `role="inquisitor"` (**Qwen3.6 35B A3B**): mandatory Phase 3 merciless diff audit (`merciless-local-audit` skill).
+3. **Uncertainty Check (`evaluate_task_uncertainty`)**: Inspect local outputs for errors/hesitation; retry locally with diagnostics (`context=error`) up to 2 times before asking the user via `ask_question`.
+4. **High Consultation (`format_high_consultation`)**: Package accumulated findings concisely before T3 architectural escalation.
+5. **Headroom (`headroom_compress` / `headroom_retrieve`)**: Mandatory for payloads >80 lines / >800 tokens.
 
-## Operational Flows & On-Ramps
+## 2. Strict Fail-Closed Policy
 
-### Mandatory Post-Dev / Post-Fix Merciless Local Audit (0 Cloud Tokens)
-Across **every project**, immediately after completing any code development, refactoring, or bug fix (and before any git commit or final validation):
-1. Collect the `git diff` and invoke the local model via `execute_local_task` (or skill `merciless-local-audit`).
-2. The local model acts as an uncompromising code auditor checking for language idiomaticity, boundary errors, silent failures, race conditions, and missing tests.
-3. If `[BLOCKING]` defects are found, auto-heal locally and re-audit before proceeding.
+If `execute_local_task` fails, times out, or returns `allow_cloud_fallback: false`:
+- **NEVER** fallback silently to `flash`, `pro`, or primary cloud generation — in ANY budget state (`GREEN`, `YELLOW`, `RED`).
+- **STOP** and invoke `ask_question` (retry local vs explicit user consent for cloud).
 
-### Standard Flows
-1. **Main Flow (Feature Development)**:
-   - Cadrage / Spec $\rightarrow$ Implementation (Tier 1 local / Tier 2) $\rightarrow$ **Post-Dev Merciless Local Audit (`execute_local_task`, 0 tokens)** $\rightarrow$ Adversarial Grill (`grill-orchestrator` if T3) $\rightarrow$ Native validation $\rightarrow$ Phase boundary decision.
-2. **On-Ramp Bug / Regression**:
-   - Write a minimal failing test locally via `execute_local_task` $\rightarrow$ Fix & Auto-heal $\rightarrow$ **Post-Fix Merciless Local Audit (`execute_local_task`, 0 tokens)** $\rightarrow$ Verify.
-3. **On-Ramp Architecture / Health**:
-   - Survey with Headroom MCP (`headroom_retrieve`) $\rightarrow$ Assess coupling $\rightarrow$ Gate 1 plan.
-4. **Recommend & Stop**:
-   - When suggesting next steps or answering strategic questions, provide the path, highlight trade-offs, and stop without mutating code until the user approves.
+## 3. Standard Flows
+
+1. **Feature**: Spec (`RequestFeedback: true`) -> local `maker` (`<=150 LOC`/call) -> Phase 2 native tests -> Phase 3 local `inquisitor` -> `grill-orchestrator` (T3 critical only) -> Gate A/B (`idiomatic-craft` §4) -> mandatory Phase Boundary (`/compact` / `/clear`).
+2. **Bug / Regression**: Failing test (`maker`) -> local fix + auto-healing -> Phase 3 `inquisitor` -> native validation -> Gate A/B -> Phase Boundary.
+3. **Architecture / Health**: `headroom_retrieve` -> identify seams -> Recommend & Stop before editing.

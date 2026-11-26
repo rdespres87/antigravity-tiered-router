@@ -13,6 +13,7 @@ Governs 3-tier delegation, local LM Studio offloading (0 cloud tokens), and Head
 
 ## 2. Permanent Local-First & Critical RED Protocol
 - **Permanent Local-First (GREEN / YELLOW / RED)**: Whenever LM Studio is active (`local=...`), default to `execute_local_task(role="maker")` for modular functions, algorithms, unit tests, fixtures, boilerplate, docstrings, and commit messages, and `execute_local_task(role="inquisitor")` for Phase 3 audits.
+- **Local Maker Chunking (Anti-Truncation)**: Target at most **1 file or 1 focused function/slice (`<=150 LOC`)** per `execute_local_task(role="maker")` call to avoid `finish_reason: "length"` truncations; split larger edits into sequential focused calls.
 - **Critical Quota RED (<15% 7d remaining or RED)**:
   - Cloud model acts as **pure orchestrator**: strictly FORBIDDEN from generating domain code, algorithms, or test implementations directly in chat or cloud subagents.
   - **100% Local Offloading**: code generation, refactoring, bug fixes, unit tests, compiler/test error diagnosis (`context=error`), docs, and conventional commit drafting from `git diff` MUST run via `execute_local_task`.
